@@ -97,11 +97,19 @@ jobs:
           VERSION: ${{ steps.meta.outputs.chart_version }}
         run: |
           yq -i '.version = strenv(VERSION) | .appVersion = strenv(TAG)' charts/kubemox/Chart.yaml
-          yq -i '.image.repository = strenv(IMAGE)' charts/kubemox/values.yaml
+          # The upstream chart defaults image.tag to "latest", which wins over appVersion.
+          yq -i '.image.repository = strenv(IMAGE) | .image.tag = strenv(TAG)' charts/kubemox/values.yaml
           helm lint charts/kubemox
           helm package charts/kubemox -d dist
           echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ghcr.io -u "${{ github.actor }}" --password-stdin
           helm push "dist/kubemox-${VERSION}.tgz" "$CHART_REPO"
-          got="$(helm show chart "$CHART_REPO/kubemox" --version "$VERSION" | yq '.appVersion')"
-          echo "want=$TAG got=$got"
-          test "$got" = "$TAG"
+
+      - name: Published chart renders the pushed image
+        env:
+          TAG: ${{ steps.meta.outputs.tag }}
+          VERSION: ${{ steps.meta.outputs.chart_version }}
+        run: |
+          helm template kubemox "$CHART_REPO/kubemox" --version "$VERSION" > rendered.yaml
+          got="$(yq 'select(.kind == "Deployment") | .spec.template.spec.containers[0].image' rendered.yaml)"
+          echo "want=$IMAGE:$TAG got=$got"
+          test "$got" = "$IMAGE:$TAG"
