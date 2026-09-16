@@ -1,0 +1,107 @@
+# Downstream build for the pskep stand. Lives only on the pskep branch.
+# Upstream workflows are disabled in this fork; see ADR-0038 in themoriarti/pskep.
+name: pskep-build
+
+on:
+  push:
+    branches: [pskep]
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: pskep-build
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash   # -eo pipefail; the implicit default is only -e
+
+env:
+  IMAGE: ghcr.io/themoriarti/kubemox
+  CHART_REPO: oci://ghcr.io/themoriarti/charts
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Build and vet
+        run: |
+          go build ./...
+          go vet ./...
+
+      - name: Unit + envtest
+        run: make test
+
+      - name: Generated CRDs and chart are committed
+        run: |
+          make chart
+          git diff --exit-code
+
+      - uses: golangci/golangci-lint-action@v8
+        with:
+          version: v2.4.0
+          args: --timeout 10m --config .golangci.yaml
+
+      - name: Versions
+        id: meta
+        run: |
+          short="${GITHUB_SHA::7}"
+          echo "tag=pskep-${short}" >> "$GITHUB_OUTPUT"
+          echo "chart_version=$(yq '.version' charts/kubemox/Chart.yaml)-pskep-${short}" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push image
+        id: image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64
+          push: true
+          provenance: false
+          tags: ${{ env.IMAGE }}:${{ steps.meta.outputs.tag }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+
+      - name: Tag resolves to the pushed digest
+        env:
+          TAG: ${{ steps.meta.outputs.tag }}
+          WANT: ${{ steps.image.outputs.digest }}
+        run: |
+          got="$(docker buildx imagetools inspect "$IMAGE:$TAG" --format '{{json .Manifest.Digest}}' | tr -d '"')"
+          echo "want=$WANT got=$got"
+          test "$got" = "$WANT"
+
+      - uses: azure/setup-helm@v4
+
+      - name: Package and push chart
+        env:
+          TAG: ${{ steps.meta.outputs.tag }}
+          VERSION: ${{ steps.meta.outputs.chart_version }}
+        run: |
+          yq -i '.version = strenv(VERSION) | .appVersion = strenv(TAG)' charts/kubemox/Chart.yaml
+          yq -i '.image.repository = strenv(IMAGE)' charts/kubemox/values.yaml
+          helm lint charts/kubemox
+          helm package charts/kubemox -d dist
+          echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ghcr.io -u "${{ github.actor }}" --password-stdin
+          helm push "dist/kubemox-${VERSION}.tgz" "$CHART_REPO"
+          got="$(helm show chart "$CHART_REPO/kubemox" --version "$VERSION" | yq '.appVersion')"
+          echo "want=$TAG got=$got"
+          test "$got" = "$TAG"
