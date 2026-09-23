@@ -49,10 +49,9 @@ jobs:
 
       - uses: golangci/golangci-lint-action@v8
         with:
-          # Той самий пін, що в upstream golangci-lint.yaml. Дефолт екшена
-          # (v2.4.0) зібраний на go1.25 і падає на go.mod з toolchain go1.26.8.
+          # Той самий пін, що в upstream golangci-lint.yaml. v2.4.0 зібраний
+          # на go1.25 і падає на go.mod з toolchain go1.26.8.
           version: v2.13.2
-          version: v2.4.0
           args: --timeout 10m --config .golangci.yaml
 
       - name: Versions
