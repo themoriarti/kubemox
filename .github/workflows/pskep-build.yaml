@@ -49,8 +49,9 @@ jobs:
 
       - uses: golangci/golangci-lint-action@v8
         with:
-          # Той самий пін, що в upstream golangci-lint.yaml. v2.4.0 зібраний
-          # на go1.25 і падає на go.mod з toolchain go1.26.8.
+          # The same pin upstream's golangci-lint.yaml uses. The action's
+          # default (v2.4.0) is built against go1.25 and refuses a module whose
+          # toolchain is go1.26.8.
           version: v2.13.2
           args: --timeout 10m --config .golangci.yaml
 
