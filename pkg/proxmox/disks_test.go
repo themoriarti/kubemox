@@ -565,7 +565,7 @@ func TestMoveDiskRenamesVolumeAndSurvivesDestroy(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err = vm.Delete(ctx); err != nil {
+	if _, err = vm.Delete(ctx, nil); err != nil {
 		t.Fatal(err)
 	}
 	if _, ok := f.volumes[back]; !ok {
