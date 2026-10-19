@@ -291,7 +291,7 @@ func (pc *ProxmoxClient) DeleteHolderDisk(ctx context.Context, h *DiskHolder, sl
 	if err != nil {
 		return err
 	}
-	for key, unusedValue := range vm.VirtualMachineConfig.MergeUnuseds() {
+	for key, unusedValue := range vm.VirtualMachineConfig.Unuseds {
 		if unusedVolid, _ := parseDriveValue(unusedValue); unusedVolid == volid {
 			return pc.deleteConfigKey(ctx, vm, key)
 		}
@@ -341,7 +341,7 @@ func (pc *ProxmoxClient) setProtection(ctx context.Context, vm *proxmox.VirtualM
 }
 
 func (pc *ProxmoxClient) deleteConfigKey(ctx context.Context, vm *proxmox.VirtualMachine, key string) error {
-	task, err := vm.Config(ctx, proxmox.VirtualMachineOption{Name: "delete", Value: key})
+	task, err := vm.Config(ctx, proxmox.VirtualMachineOption{Name: optionDelete, Value: key})
 	if err != nil {
 		return fmt.Errorf("removing %s from VM %d: %w", key, vm.VMID, err)
 	}
@@ -365,7 +365,7 @@ func freeDiskSlot(cfg *proxmox.VirtualMachineConfig) (string, error) {
 // driveValue returns the config value of a drive slot, or "" when empty.
 func driveValue(cfg *proxmox.VirtualMachineConfig, slot string) string {
 	if strings.HasPrefix(slot, "unused") {
-		return cfg.MergeUnuseds()[slot]
+		return cfg.Unuseds[slot]
 	}
 	return cfg.MergeDisks()[slot]
 }
