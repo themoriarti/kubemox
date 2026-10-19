@@ -104,6 +104,7 @@ func (pc *ProxmoxClient) CreateVMFromTemplate(vm *proxmoxv1alpha1.VirtualMachine
 	CloneOptions.Full = vm.Spec.CloneMode.CloneFlag()
 	CloneOptions.Name = vm.Name
 	CloneOptions.Target = nodeName
+	CloneOptions.Pool = vm.Spec.Pool
 	log.Log.Info(fmt.Sprintf("Creating VM from template: %s", templateVMName))
 	// Make sure that not two VMs are created at the exact time
 	mutex.Lock()
@@ -478,6 +479,9 @@ func (pc *ProxmoxClient) CreateVMFromScratch(vm *proxmoxv1alpha1.VirtualMachine)
 			})
 		}
 	}
+	// Pool, tags, SMBIOS UUID, firmware: the parts of the spec that belong
+	// to the machine rather than to a device.
+	VMOptions = append(VMOptions, creationOptions(vm)...)
 	// Make sure that not two VMs are created at the exact time
 	var vmID int
 	var task *proxmox.Task
@@ -794,7 +798,8 @@ func (pc *ProxmoxClient) ConfigureVirtualMachine(vm *proxmoxv1alpha1.VirtualMach
 	if err != nil {
 		return err
 	}
-	return nil
+	// SMBIOS UUID, BIOS, machine type and tags.
+	return pc.ConfigureIdentity(vm)
 }
 
 func (pc *ProxmoxClient) deleteVirtualMachineOption(vm *proxmoxv1alpha1.VirtualMachine,
