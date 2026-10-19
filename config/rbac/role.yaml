@@ -10,6 +10,8 @@ rules:
   - secrets
   verbs:
   - get
+  - list
+  - watch
 - apiGroups:
   - ""
   - events.k8s.io
@@ -43,6 +45,7 @@ rules:
   - virtualmachinesnapshotpolicies
   - virtualmachinesnapshots
   - virtualmachinetemplates
+  - virtualmachinevolumes
   verbs:
   - create
   - delete
@@ -63,6 +66,7 @@ rules:
   - virtualmachinesnapshotpolicies/finalizers
   - virtualmachinesnapshots/finalizers
   - virtualmachinetemplates/finalizers
+  - virtualmachinevolumes/finalizers
   verbs:
   - update
 - apiGroups:
@@ -77,6 +81,7 @@ rules:
   - virtualmachinesnapshotpolicies/status
   - virtualmachinesnapshots/status
   - virtualmachinetemplates/status
+  - virtualmachinevolumes/status
   verbs:
   - get
   - patch

@@ -37,12 +37,8 @@ type VMTemplateDesiredState struct {
 
 // ProxmoxResourceKey holds the information needed to fetch a resource from Proxmox.
 type ProxmoxResourceKey struct {
-	Name     string
-	NodeName string
-	// VMID is the Proxmox identifier once the resource has been observed at
-	// least once. Zero means it has not been, and the fetcher falls back to
-	// resolving the name — which is the only moment a name is trusted.
-	VMID          int
+	Name          string
+	NodeName      string
 	ConnectionRef *corev1.LocalObjectReference
 }
 
@@ -116,7 +112,7 @@ func (f *VirtualMachineFetcher) FetchExternalResource(ctx context.Context, objKe
 	if err != nil {
 		return nil, err
 	}
-	vmID, err := pc.getVMID(VMRef{ID: key.VMID, Name: key.Name, Node: key.NodeName})
+	vmID, err := pc.getVMID(key.Name, key.NodeName)
 	if err != nil {
 		return nil, err
 	}
@@ -135,7 +131,7 @@ func (f *VirtualMachineFetcher) TransformExternalState(raw any) (any, error) {
 	}
 	cfg := vm.VirtualMachineConfig
 
-	networks, err := parseNetworkConfiguration(cfg.MergeNets())
+	networks, err := parseNetworkConfiguration(cfg.Nets)
 	if err != nil {
 		return nil, err
 	}
@@ -152,8 +148,8 @@ func (f *VirtualMachineFetcher) TransformExternalState(raw any) (any, error) {
 	}
 
 	return VirtualMachineComparison{
-		Cores:    cfg.Cores,
-		Sockets:  cfg.Sockets,
+		Cores:    derefInt(cfg.Cores),
+		Sockets:  derefInt(cfg.Sockets),
 		Memory:   int(cfg.Memory),
 		Networks: networks,
 		Disks:    sortDisks(parsedDisks),
@@ -177,7 +173,7 @@ func (f *VirtualMachineFetcher) UpdateResourceStatus(ctx context.Context, key ty
 	if err != nil {
 		return err
 	}
-	qemuStatus, err := pc.UpdateVMStatus(VMRefFromCR(vm))
+	qemuStatus, err := pc.UpdateVMStatus(vm.Spec.Name, vm.Spec.NodeName)
 	if err != nil {
 		return err
 	}
@@ -300,7 +296,7 @@ func (f *VirtualMachineTemplateFetcher) FetchExternalResource(ctx context.Contex
 	if err != nil {
 		return nil, fmt.Errorf("getting Proxmox client: %w", err)
 	}
-	vm, err := pc.getVirtualMachine(VMRef{ID: key.VMID, Name: key.Name, Node: key.NodeName})
+	vm, err := pc.getVirtualMachine(key.Name, key.NodeName)
 	if err != nil {
 		return nil, err
 	}
@@ -314,8 +310,8 @@ func (f *VirtualMachineTemplateFetcher) TransformExternalState(raw any) (any, er
 	}
 	cfg := vm.VirtualMachineConfig
 	return VMTemplateDesiredState{
-		Cores:   cfg.Cores,
-		Sockets: cfg.Sockets,
+		Cores:   derefInt(cfg.Cores),
+		Sockets: derefInt(cfg.Sockets),
 		Memory:  int(cfg.Memory),
 	}, nil
 }
@@ -337,7 +333,6 @@ func VMConfigExtractor(obj cc.Object) watcher.ResourceConfig {
 		ResourceKey: ProxmoxResourceKey{
 			Name:          vm.Spec.Name,
 			NodeName:      vm.Spec.NodeName,
-			VMID:          vmidFromStatus(vm),
 			ConnectionRef: vm.Spec.ConnectionRef,
 		},
 	}
@@ -365,13 +360,4 @@ func VMTemplateConfigExtractor(obj cc.Object) watcher.ResourceConfig {
 			ConnectionRef: vmTemplate.Spec.ConnectionRef,
 		},
 	}
-}
-
-// vmidFromStatus returns the observed VMID, or zero when the machine has not
-// been observed yet.
-func vmidFromStatus(vm *proxmoxv1alpha1.VirtualMachine) int {
-	if vm.Status.Status == nil {
-		return 0
-	}
-	return vm.Status.Status.ID
 }

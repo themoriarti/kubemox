@@ -90,7 +90,7 @@ func (pc *ProxmoxClient) CreateVMFromTemplate(vm *proxmoxv1alpha1.VirtualMachine
 
 	nodeName := vm.Spec.NodeName
 	templateVMName := vm.Spec.Template.Name
-	templateVM, err := pc.getVirtualMachine(NamedVMRef(templateVMName, nodeName))
+	templateVM, err := pc.getVirtualMachine(templateVMName, nodeName)
 	if err != nil {
 		log.Log.Error(err, "Error getting template VM")
 		// If template VM doesn't exist, return the error as unrecoverable
@@ -101,7 +101,7 @@ func (pc *ProxmoxClient) CreateVMFromTemplate(vm *proxmoxv1alpha1.VirtualMachine
 	var CloneOptions proxmox.VirtualMachineCloneOptions
 	// A linked clone lives on the template's storage by definition, so no
 	// storage is passed here in either mode.
-	CloneOptions.Full = vm.Spec.CloneMode.CloneFlag()
+	CloneOptions.Full = proxmox.IntOrBool(vm.Spec.CloneMode.IsFullClone())
 	CloneOptions.Name = vm.Name
 	CloneOptions.Target = nodeName
 	log.Log.Info(fmt.Sprintf("Creating VM from template: %s", templateVMName))
@@ -136,77 +136,71 @@ func (pc *ProxmoxClient) CreateVMFromTemplate(vm *proxmoxv1alpha1.VirtualMachine
 		log.Log.Error(taskErr, "Can't stop VM")
 		return taskErr
 	}
+	// Cache the new VM ID
+	pc.setCachedVMID(nodeName, vm.Name, newID)
 	return nil
 }
 
-func (pc *ProxmoxClient) getVMID(ref VMRef) (int, error) {
-	// A reference that already carries a VMID needs no lookup at all, which is
-	// the point: after the first observation the name stops mattering.
-	if ref.HasID() {
-		return ref.ID, nil
-	}
-	// No VMID yet — a first lookup, or adopting a machine kubemox did not
-	// create. Everything below exists to make sure the name picked exactly one.
-	// Deliberately not cached. A name-to-VMID map cannot be invalidated when a
-	// machine is renamed in Proxmox, and a stale entry answers a later lookup
-	// of the old name with the machine that used to hold it — which is the
-	// cross-tenant adoption this whole change exists to remove. Caching is
-	// also no longer worth much here: with identity carried in status, a name
-	// is resolved once per resource rather than on every call.
-	node, err := pc.getNode(ctx, ref.Node)
+func (pc *ProxmoxClient) getVMID(vmName, nodeName string) (int, error) {
+	// Get node
+	node, err := pc.getNode(ctx, nodeName)
 	if err != nil {
 		return 0, err
 	}
+	// If it's in the cache, return it directly
+	pc.vmIDMutex.RLock()
+	if vmID, exists := pc.nodesCache[nodeName].vms[vmName]; exists {
+		pc.vmIDMutex.RUnlock()
+		return vmID, nil
+	}
+	pc.vmIDMutex.RUnlock()
+	// Not in cache, fetch from API
 	vmList, err := node.VirtualMachines(ctx)
 	if err != nil {
 		return 0, err
 	}
-	var matches []int
 	for _, vm := range vmList {
-		if strings.EqualFold(vm.Name, ref.Name) {
-			matches = append(matches, int(vm.VMID))
+		if strings.EqualFold(vm.Name, vmName) {
+			vmID := int(vm.VMID)
+			// Store in cache
+			pc.setCachedVMID(nodeName, vmName, vmID)
+			return vmID, nil
 		}
 	}
-	switch len(matches) {
-	case 0:
-		return 0, &NotFoundError{
-			Message: fmt.Sprintf("virtual machine %q not found on node %s", ref.Name, ref.Node),
-		}
-	case 1:
-		return matches[0], nil
-	default:
-		return 0, &AmbiguousNameError{Name: ref.Name, Matches: vmidsToStrings(matches)}
-	}
+	return 0, nil
 }
 
-// vmidsToStrings renders VMIDs for an error message.
-func vmidsToStrings(ids []int) []string {
-	out := make([]string, 0, len(ids))
-	for _, id := range ids {
-		out = append(out, fmt.Sprintf("vmid %d", id))
-	}
-	return out
-}
-
-func (pc *ProxmoxClient) CheckVM(ref VMRef) (bool, error) {
-	// Existence is resolution: if the reference names exactly one machine, it
-	// exists. This deliberately delegates rather than scanning names itself —
-	// a second scan is a second answer to "which machine is this", and the one
-	// that ran first used to win by caching its match, which hid ambiguity
-	// from every later lookup.
-	_, err := pc.getVMID(ref)
+func (pc *ProxmoxClient) CheckVM(vmName, nodeName string) (bool, error) {
+	// Check if VM exists
+	node, err := pc.getNode(ctx, nodeName)
 	if err != nil {
-		var notFound *NotFoundError
-		if errors.As(err, &notFound) {
-			return false, nil
-		}
 		return false, err
 	}
-	return true, nil
+	// Check cache first
+	pc.vmIDMutex.RLock()
+	if _, exists := pc.nodesCache[nodeName].vms[vmName]; exists {
+		pc.vmIDMutex.RUnlock()
+		return true, nil
+	}
+	pc.vmIDMutex.RUnlock()
+	// If not in cache, fetch from API
+	vmList, err := node.VirtualMachines(ctx)
+	if err != nil {
+		return false, err
+	}
+	for _, vm := range vmList {
+		// if vm.Name == vmName {
+		if strings.EqualFold(vm.Name, vmName) {
+			// Cache the VM ID while we're at it
+			pc.setCachedVMID(nodeName, vm.Name, int(vm.VMID))
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
-func (pc *ProxmoxClient) GetVMIPv4Address(ref VMRef) string {
-	VirtualMachine, err := pc.getVirtualMachine(ref)
+func (pc *ProxmoxClient) GetVMIPv4Address(vmName, nodeName string) string {
+	VirtualMachine, err := pc.getVirtualMachine(vmName, nodeName)
 	if err != nil {
 		log.Log.Error(err, "Error getting VM")
 		return ""
@@ -215,7 +209,7 @@ func (pc *ProxmoxClient) GetVMIPv4Address(ref VMRef) string {
 	VirtualMachineIfaces, err := VirtualMachine.AgentGetNetworkIFaces(ctx)
 	if err != nil {
 		// Agent may stop between the readiness check and this call (VM shutting down/deleting)
-		log.Log.V(1).Info("Unable to get VM IP, guest agent may not be running", "vm", ref.Name, "error", err)
+		log.Log.V(1).Info("Unable to get VM IP, guest agent may not be running", "vm", vmName, "error", err)
 		return ""
 	}
 	for _, iface := range VirtualMachineIfaces {
@@ -228,8 +222,8 @@ func (pc *ProxmoxClient) GetVMIPv4Address(ref VMRef) string {
 	return ""
 }
 
-func (pc *ProxmoxClient) GetOSInfo(ref VMRef) string {
-	VirtualMachine, err := pc.getVirtualMachine(ref)
+func (pc *ProxmoxClient) GetOSInfo(vmName, nodeName string) string {
+	VirtualMachine, err := pc.getVirtualMachine(vmName, nodeName)
 	if err != nil {
 		log.Log.Error(err, "Error getting VM")
 		return ""
@@ -238,7 +232,7 @@ func (pc *ProxmoxClient) GetOSInfo(ref VMRef) string {
 	VirtualMachineOS, err := VirtualMachine.AgentOsInfo(ctx)
 	if err != nil {
 		// Agent may stop between the readiness check and this call (VM shutting down/deleting)
-		log.Log.V(1).Info("Unable to get VM OS info, guest agent may not be running", "vm", ref.Name, "error", err)
+		log.Log.V(1).Info("Unable to get VM OS info, guest agent may not be running", "vm", vmName, "error", err)
 		return ""
 	}
 	// Check either the OS name or pretty name is empty
@@ -252,8 +246,8 @@ func (pc *ProxmoxClient) GetOSInfo(ref VMRef) string {
 	}
 }
 
-func (pc *ProxmoxClient) GetVMUptime(ref VMRef) string {
-	VirtualMachine, err := pc.getVirtualMachine(ref)
+func (pc *ProxmoxClient) GetVMUptime(vmName, nodeName string) string {
+	VirtualMachine, err := pc.getVirtualMachine(vmName, nodeName)
 	if err != nil {
 		log.Log.Error(err, "Error getting VM")
 	}
@@ -264,8 +258,8 @@ func (pc *ProxmoxClient) GetVMUptime(ref VMRef) string {
 	return uptime
 }
 
-func (pc *ProxmoxClient) DeleteVM(ref VMRef) error {
-	VirtualMachine, err := pc.getVirtualMachine(ref)
+func (pc *ProxmoxClient) DeleteVM(vmName, nodeName string) error {
+	VirtualMachine, err := pc.getVirtualMachine(vmName, nodeName)
 	if err != nil {
 		// No need to log the error here
 		// log.Log.Error(err, "Error getting VM")
@@ -297,7 +291,7 @@ func (pc *ProxmoxClient) DeleteVM(ref VMRef) error {
 		}
 	}
 	// Delete VM
-	task, err := VirtualMachine.Delete(ctx)
+	task, err := VirtualMachine.Delete(ctx, nil)
 	if err != nil {
 		return err
 	}
@@ -311,16 +305,17 @@ func (pc *ProxmoxClient) DeleteVM(ref VMRef) error {
 		log.Log.Error(taskErr, "Can't delete VM")
 		return taskErr
 	}
-	// Invalidate the cached machine object
+	// Invalidate cache entry for this VM
 	pc.vmIDMutex.Lock()
-	delete(pc.nodesCache[ref.Node].vmObjs, int(VirtualMachine.VMID))
+	delete(pc.nodesCache[nodeName].vms, vmName)
+	delete(pc.nodesCache[nodeName].vmObjs, int(VirtualMachine.VMID))
 	pc.vmIDMutex.Unlock()
 
 	return nil
 }
 
-func (pc *ProxmoxClient) StartVM(ref VMRef) (bool, error) {
-	VirtualMachine, err := pc.getVirtualMachine(ref)
+func (pc *ProxmoxClient) StartVM(vmName, nodeName string) (bool, error) {
+	VirtualMachine, err := pc.getVirtualMachine(vmName, nodeName)
 	if err != nil {
 		return false, err
 	}
@@ -354,8 +349,8 @@ func (pc *ProxmoxClient) StartVM(ref VMRef) (bool, error) {
 	}
 }
 
-func (pc *ProxmoxClient) RestartVM(ref VMRef) (*proxmox.Task, error) {
-	VirtualMachine, err := pc.getVirtualMachine(ref)
+func (pc *ProxmoxClient) RestartVM(vmName, nodeName string) (*proxmox.Task, error) {
+	VirtualMachine, err := pc.getVirtualMachine(vmName, nodeName)
 	if err != nil {
 		log.Log.Error(err, "Error getting VM to restart")
 		return nil, err
@@ -368,8 +363,8 @@ func (pc *ProxmoxClient) RestartVM(ref VMRef) (*proxmox.Task, error) {
 	return task, nil
 }
 
-func (pc *ProxmoxClient) StopVM(ref VMRef) error {
-	VirtualMachine, err := pc.getVirtualMachine(ref)
+func (pc *ProxmoxClient) StopVM(vmName, nodeName string) error {
+	VirtualMachine, err := pc.getVirtualMachine(vmName, nodeName)
 	if err != nil {
 		log.Log.Error(err, "Error getting VM to stop")
 		return err
@@ -394,9 +389,9 @@ func (pc *ProxmoxClient) StopVM(ref VMRef) error {
 	}
 }
 
-func (pc *ProxmoxClient) GetVMState(ref VMRef) (state string, err error) {
+func (pc *ProxmoxClient) GetVMState(vmName, nodeName string) (state string, err error) {
 	// Gets the VMstate from Proxmox API
-	VirtualMachine, err := pc.getVirtualMachine(ref)
+	VirtualMachine, err := pc.getVirtualMachine(vmName, nodeName)
 	if err != nil {
 		return "unknown", err
 	}
@@ -410,8 +405,8 @@ func (pc *ProxmoxClient) GetVMState(ref VMRef) (state string, err error) {
 	}
 }
 
-func (pc *ProxmoxClient) AgentIsRunning(ref VMRef) (bool, error) {
-	VirtualMachine, err := pc.getVirtualMachine(ref)
+func (pc *ProxmoxClient) AgentIsRunning(vmName, nodeName string) (bool, error) {
+	VirtualMachine, err := pc.getVirtualMachine(vmName, nodeName)
 	if err != nil {
 		log.Log.Error(err, "Error getting VM for agent check")
 		return false, err
@@ -512,6 +507,8 @@ func (pc *ProxmoxClient) CreateVMFromScratch(vm *proxmoxv1alpha1.VirtualMachine)
 	if !taskCompleted {
 		return taskErr
 	}
+	// Cache the new VM ID
+	pc.setCachedVMID(nodeName, vm.Spec.Name, vmID)
 	return nil
 }
 
@@ -530,30 +527,30 @@ func CheckVMType(vm *proxmoxv1alpha1.VirtualMachine) string {
 	return VMType
 }
 
-func (pc *ProxmoxClient) UpdateVMStatus(ref VMRef) (*proxmoxv1alpha1.QEMUStatus, error) {
+func (pc *ProxmoxClient) UpdateVMStatus(vmName, nodeName string) (*proxmoxv1alpha1.QEMUStatus, error) {
 	var VirtualMachineIP string
 	var VirtualMachineOS string
 	var VirtualmachineStatus *proxmoxv1alpha1.QEMUStatus
 	// Get VM status
 	// Check if VM is already created
-	vmExists, err := pc.CheckVM(ref)
+	vmExists, err := pc.CheckVM(vmName, nodeName)
 	if err != nil {
 		return nil, err
 	}
 	if vmExists {
 		// Get VMID
-		VirtualMachine, err := pc.getVirtualMachine(ref)
+		VirtualMachine, err := pc.getVirtualMachine(vmName, nodeName)
 		if err != nil {
 			return nil, err
 		}
-		agentRunning, err := pc.AgentIsRunning(ref)
+		agentRunning, err := pc.AgentIsRunning(vmName, nodeName)
 		if err != nil {
 			log.Log.Error(err, "Error checking if agent is running")
 			return nil, err
 		}
 		if agentRunning {
-			VirtualMachineIP = pc.GetVMIPv4Address(ref)
-			VirtualMachineOS = pc.GetOSInfo(ref)
+			VirtualMachineIP = pc.GetVMIPv4Address(vmName, nodeName)
+			VirtualMachineOS = pc.GetOSInfo(vmName, nodeName)
 		} else {
 			VirtualMachineIP = virtualMachineStatusNilPlaceholder
 			VirtualMachineOS = virtualMachineStatusNilPlaceholder
@@ -562,7 +559,7 @@ func (pc *ProxmoxClient) UpdateVMStatus(ref VMRef) (*proxmoxv1alpha1.QEMUStatus,
 			State:     VirtualMachine.Status,
 			ID:        int(VirtualMachine.VMID),
 			Node:      VirtualMachine.Node,
-			Uptime:    pc.GetVMUptime(ref),
+			Uptime:    pc.GetVMUptime(vmName, nodeName),
 			IPAddress: VirtualMachineIP,
 			OSInfo:    VirtualMachineOS,
 		}
@@ -581,9 +578,10 @@ func (pc *ProxmoxClient) UpdateVMStatus(ref VMRef) (*proxmoxv1alpha1.QEMUStatus,
 }
 
 func (pc *ProxmoxClient) UpdateVM(vm *proxmoxv1alpha1.VirtualMachine) (bool, error) {
-	ref := VMRefFromCR(vm)
+	vmName := vm.Spec.Name
+	nodeName := vm.Spec.NodeName
 	updateStatus := false
-	VirtualMachine, err := pc.getVirtualMachine(ref)
+	VirtualMachine, err := pc.getVirtualMachine(vmName, nodeName)
 	if err != nil {
 		log.Log.Error(err, "Error getting VM")
 		return false, err
@@ -625,7 +623,7 @@ func (pc *ProxmoxClient) UpdateVM(vm *proxmoxv1alpha1.VirtualMachine) (bool, err
 			return true, nil
 		}
 
-		task, err = pc.RestartVM(ref)
+		task, err = pc.RestartVM(vmName, nodeName)
 		if err != nil {
 			return false, err
 		}
@@ -645,13 +643,13 @@ func (pc *ProxmoxClient) UpdateVM(vm *proxmoxv1alpha1.VirtualMachine) (bool, err
 	return updateStatus, nil
 }
 
-func (pc *ProxmoxClient) CreateVMSnapshot(ref VMRef, snapshotName string) (statusCode int, err error) {
-	ref, err = pc.resolveNode(ref)
+func (pc *ProxmoxClient) CreateVMSnapshot(vmName, snapshotName string) (statusCode int, err error) {
+	nodeName, err := pc.GetNodeOfVM(vmName)
 	if err != nil {
 		log.Log.Error(err, "Error getting node of VM for snapshot creation")
 		return 1, err
 	}
-	VirtualMachine, err := pc.getVirtualMachine(ref)
+	VirtualMachine, err := pc.getVirtualMachine(vmName, nodeName)
 	if err != nil {
 		log.Log.Error(err, "Error getting VM for snapshot creation")
 		return 1, err
@@ -667,30 +665,25 @@ func (pc *ProxmoxClient) CreateVMSnapshot(ref VMRef, snapshotName string) (statu
 		return 1, &TaskError{ExitStatus: task.ExitStatus}
 	}
 	if !taskCompleted {
-		log.Log.Error(taskErr, "Can't create snapshot for the VirtualMachine %s", ref.Name)
+		log.Log.Error(taskErr, "Can't create snapshot for the VirtualMachine %s", vmName)
 		return 1, taskErr
 	}
 	return 0, nil
 }
 
-func (pc *ProxmoxClient) GetVMSnapshots(ref VMRef) ([]string, error) {
-	// Each of these used to log and carry on, which left VirtualMachine nil
-	// and turned a lookup failure into a nil dereference one line later.
-	ref, err := pc.resolveNode(ref)
+func (pc *ProxmoxClient) GetVMSnapshots(vmName string) ([]string, error) {
+	nodeName, err := pc.GetNodeOfVM(vmName)
 	if err != nil {
 		log.Log.Error(err, "Error getting node of VM for snapshot listing")
-		return nil, err
 	}
-	VirtualMachine, err := pc.getVirtualMachine(ref)
+	VirtualMachine, err := pc.getVirtualMachine(vmName, nodeName)
 	if err != nil {
 		log.Log.Error(err, "Error getting VM for snapshot listing")
-		return nil, err
 	}
 	// Get snapshots
 	snapshots, err := VirtualMachine.Snapshots(ctx)
 	if err != nil {
 		log.Log.Error(err, "Error getting snapshots")
-		return nil, err
 	}
 	snapshotNames := make([]string, 0, len(snapshots))
 	for _, snapshot := range snapshots {
@@ -699,8 +692,8 @@ func (pc *ProxmoxClient) GetVMSnapshots(ref VMRef) ([]string, error) {
 	return snapshotNames, err
 }
 
-func (pc *ProxmoxClient) VMSnapshotExists(ref VMRef, snapshotName string) bool {
-	snapshots, err := pc.GetVMSnapshots(ref)
+func (pc *ProxmoxClient) VMSnapshotExists(vmName, snapshotName string) bool {
+	snapshots, err := pc.GetVMSnapshots(vmName)
 	if err != nil {
 		log.Log.Error(err, "Error getting snapshots")
 		return false
@@ -713,8 +706,8 @@ func (pc *ProxmoxClient) VMSnapshotExists(ref VMRef, snapshotName string) bool {
 	return false
 }
 
-func (pc *ProxmoxClient) RemoveVirtualMachineTag(ref VMRef, tag string) error {
-	VirtualMachine, err := pc.getVirtualMachine(ref)
+func (pc *ProxmoxClient) RemoveVirtualMachineTag(vmName, nodeName, tag string) error {
+	VirtualMachine, err := pc.getVirtualMachine(vmName, nodeName)
 	if err != nil {
 		log.Log.Error(err, "Error getting VM for removing tag")
 	}
@@ -735,8 +728,8 @@ func (pc *ProxmoxClient) RemoveVirtualMachineTag(ref VMRef, tag string) error {
 }
 
 // EnsureVMTag checks if the VM has the operator tag and adds it if missing.
-func (pc *ProxmoxClient) EnsureVMTag(ref VMRef) error {
-	VirtualMachine, err := pc.getVirtualMachine(ref)
+func (pc *ProxmoxClient) EnsureVMTag(vmName, nodeName string) error {
+	VirtualMachine, err := pc.getVirtualMachine(vmName, nodeName)
 	if err != nil {
 		return err
 	}
@@ -758,12 +751,12 @@ func (pc *ProxmoxClient) EnsureVMTag(ref VMRef) error {
 }
 
 func (pc *ProxmoxClient) GetNetworkConfiguration(vm *proxmoxv1alpha1.VirtualMachine) (map[string]string, error) {
-	VirtualMachine, err := pc.getVirtualMachine(VMRefFromCR(vm))
+	VirtualMachine, err := pc.getVirtualMachine(vm.Name, vm.Spec.NodeName)
 	if err != nil {
 		return make(map[string]string), err
 	}
 	// Get all networks of VM
-	return VirtualMachine.VirtualMachineConfig.MergeNets(), nil
+	return VirtualMachine.VirtualMachineConfig.Nets, nil
 }
 
 func parseNetworkConfiguration(networks map[string]string) ([]proxmoxv1alpha1.VirtualMachineNetwork, error) {
@@ -806,7 +799,8 @@ func (pc *ProxmoxClient) ConfigureVirtualMachine(vm *proxmoxv1alpha1.VirtualMach
 
 func (pc *ProxmoxClient) deleteVirtualMachineOption(vm *proxmoxv1alpha1.VirtualMachine,
 	option string) (proxmox.Task, error) {
-	virtualMachine, err := pc.getVirtualMachine(VMRefFromCR(vm))
+	nodeName := vm.Spec.NodeName
+	virtualMachine, err := pc.getVirtualMachine(vm.Name, nodeName)
 	if err != nil {
 		log.Log.Error(err, "Error getting VM for deleting option")
 	}
@@ -824,7 +818,7 @@ func (pc *ProxmoxClient) updateNetworkConfig(ctx context.Context,
 	networkModel := networks[i].Model
 	networkBridge := networks[i].Bridge
 	// Update the network configuration
-	virtualMachine, err := pc.getVirtualMachine(VMRefFromCR(vm))
+	virtualMachine, err := pc.getVirtualMachine(vm.Name, vm.Spec.NodeName)
 	if err != nil {
 		log.Log.Error(err, "Error getting VM for updating network configuration")
 	}
@@ -904,7 +898,7 @@ func (pc *ProxmoxClient) updateNetworkConfig(ctx context.Context,
 // func addNetworkConfig(ctx context.Context, vm *proxmoxv1alpha1.VirtualMachine,
 // network proxmoxv1alpha1.VirtualMachineSpecTemplateNetwork) error {
 // // Add the network configuration
-// virtualMachine, err := pc.getVirtualMachine(VMRefFromCR(vm))
+// virtualMachine, err := pc.getVirtualMachine(vm.Name, vm.Spec.NodeName)
 // if err != nil {
 // log.Log.Error(err, "Error getting VM for adding network configuration")
 // }
@@ -974,7 +968,8 @@ func (pc *ProxmoxClient) configureVirtualMachineNetwork(vm *proxmoxv1alpha1.Virt
 }
 
 func (pc *ProxmoxClient) GetDiskConfiguration(vm *proxmoxv1alpha1.VirtualMachine) (map[string]string, error) {
-	VirtualMachine, err := pc.getVirtualMachine(VMRefFromCR(vm))
+	nodeName := vm.Spec.NodeName
+	VirtualMachine, err := pc.getVirtualMachine(vm.Name, nodeName)
 	if err != nil {
 		return make(map[string]string), err
 	}
@@ -1114,7 +1109,7 @@ func (pc *ProxmoxClient) updateDiskConfig(ctx context.Context, vm *proxmoxv1alph
 		return nil
 	}
 
-	virtualMachine, err := pc.getVirtualMachine(VMRefFromCR(vm))
+	virtualMachine, err := pc.getVirtualMachine(vm.Name, vm.Spec.NodeName)
 	if err != nil {
 		logger.Error(err, "Error getting VM for updating disk configuration")
 		return err
@@ -1131,7 +1126,7 @@ func (pc *ProxmoxClient) updateDiskConfig(ctx context.Context, vm *proxmoxv1alph
 
 func (pc *ProxmoxClient) addDiskConfig(ctx context.Context, vm *proxmoxv1alpha1.VirtualMachine,
 	disk proxmoxv1alpha1.VirtualMachineDisk) error {
-	virtualMachine, err := pc.getVirtualMachine(VMRefFromCR(vm))
+	virtualMachine, err := pc.getVirtualMachine(vm.Name, vm.Spec.NodeName)
 	if err != nil {
 		log.Log.Error(err, "Error getting VM for updating disk configuration")
 		return err
@@ -1164,7 +1159,7 @@ func (pc *ProxmoxClient) CheckVirtualMachineDelta(vm *proxmoxv1alpha1.VirtualMac
 	if err != nil {
 		return false, err
 	}
-	vmID, err := pc.getVMID(VMRefFromCR(vm))
+	vmID, err := pc.getVMID(vm.Spec.Name, vm.Spec.NodeName)
 	if err != nil {
 		return false, err
 	}
@@ -1195,8 +1190,8 @@ func (pc *ProxmoxClient) CheckVirtualMachineDelta(vm *proxmoxv1alpha1.VirtualMac
 
 	VirtualMachineConfig := VirtualMachine.VirtualMachineConfig
 	actualVM := VirtualMachineComparison{
-		Cores:    VirtualMachineConfig.Cores,
-		Sockets:  VirtualMachineConfig.Sockets,
+		Cores:    derefInt(VirtualMachineConfig.Cores),
+		Sockets:  derefInt(VirtualMachineConfig.Sockets),
 		Memory:   int(VirtualMachineConfig.Memory),
 		Networks: VirtualMachineNetworksParsed,
 		Disks:    sortDisks(VirtualMachineDisksParsed),
@@ -1238,17 +1233,17 @@ func getNextVMID(client *proxmox.Client) (int, error) {
 	return vmID, nil
 }
 
-func (pc *ProxmoxClient) getVirtualMachine(ref VMRef) (*proxmox.VirtualMachine, error) {
-	node, err := pc.getNode(ctx, ref.Node)
+func (pc *ProxmoxClient) getVirtualMachine(vmName, nodeName string) (*proxmox.VirtualMachine, error) {
+	node, err := pc.getNode(ctx, nodeName)
 	if err != nil {
 		return nil, err
 	}
-	vmID, err := pc.getVMID(ref)
+	vmID, err := pc.getVMID(vmName, nodeName)
 	if err != nil {
 		return nil, err
 	}
 	// Check cache
-	if vm := pc.getCachedVM(ref.Node, vmID); vm != nil {
+	if vm := pc.getCachedVM(nodeName, vmID); vm != nil {
 		return vm, nil
 	}
 	VirtualMachine, err := node.VirtualMachine(ctx, vmID)
@@ -1256,13 +1251,13 @@ func (pc *ProxmoxClient) getVirtualMachine(ref VMRef) (*proxmox.VirtualMachine, 
 		return nil, err
 	}
 	// Cache it
-	pc.setCachedVM(ref.Node, vmID, VirtualMachine)
+	pc.setCachedVM(nodeName, vmID, VirtualMachine)
 	return VirtualMachine, nil
 }
 
 func (pc *ProxmoxClient) configureVirtualMachinePCI(vm *proxmoxv1alpha1.VirtualMachine) error {
 	desiredPCIs := getPciDevices(vm)
-	actualPCIsMap, err := pc.GetPCIConfiguration(VMRefFromCR(vm))
+	actualPCIsMap, err := pc.GetPCIConfiguration(vm.Name, vm.Spec.NodeName)
 	if err != nil {
 		return err
 	}
@@ -1286,14 +1281,14 @@ func (pc *ProxmoxClient) configureVirtualMachinePCI(vm *proxmoxv1alpha1.VirtualM
 			// and unfortunately you can't track the start so
 			// here we should do stop and start separately
 			// Stop VM
-			err = pc.StopVM(VMRefFromCR(vm))
+			err = pc.StopVM(vm.Name, vm.Spec.NodeName)
 			if err != nil {
 				log.Log.Error(err, "Error stopping VirtualMachine")
 				return err
 			}
 			// TODO: Implement something more logical
 			// Start VM
-			VirtualMachine, err := pc.getVirtualMachine(VMRefFromCR(vm))
+			VirtualMachine, err := pc.getVirtualMachine(vm.Name, vm.Spec.NodeName)
 			if err != nil {
 				log.Log.Error(err, "Error getting VM")
 				return err
@@ -1320,12 +1315,12 @@ func (pc *ProxmoxClient) configureVirtualMachinePCI(vm *proxmoxv1alpha1.VirtualM
 	return nil
 }
 
-func (pc *ProxmoxClient) GetPCIConfiguration(ref VMRef) (map[string]string, error) {
-	VirtualMachine, err := pc.getVirtualMachine(ref)
+func (pc *ProxmoxClient) GetPCIConfiguration(vmName, nodeName string) (map[string]string, error) {
+	VirtualMachine, err := pc.getVirtualMachine(vmName, nodeName)
 	if err != nil {
 		return make(map[string]string), err
 	}
-	PCIs := VirtualMachine.VirtualMachineConfig.MergeHostPCIs()
+	PCIs := VirtualMachine.VirtualMachineConfig.HostPCIs
 	return PCIs, nil
 }
 
@@ -1375,7 +1370,8 @@ func (pc *ProxmoxClient) ApplyPCIChanges(vm *proxmoxv1alpha1.VirtualMachine, des
 
 func (pc *ProxmoxClient) updatePCIConfig(vm *proxmoxv1alpha1.VirtualMachine, index string,
 	pci proxmoxv1alpha1.PciDevice) error {
-	VirtualMachine, err := pc.getVirtualMachine(VMRefFromCR(vm))
+	vmName, nodeName := vm.Name, vm.Spec.NodeName
+	VirtualMachine, err := pc.getVirtualMachine(vmName, nodeName)
 	if err != nil {
 		log.Log.Error(err, "Error getting VM")
 		return err
@@ -1471,15 +1467,15 @@ func buildPCIOptions(pci proxmoxv1alpha1.PciDevice) string {
 // 	return nil
 // }
 
-func (pc *ProxmoxClient) RebootVM(ref VMRef) error {
-	virtualMachine, err := pc.getVirtualMachine(ref)
+func (pc *ProxmoxClient) RebootVM(vmName, nodeName string) error {
+	virtualMachine, err := pc.getVirtualMachine(vmName, nodeName)
 	if err != nil {
 		log.Log.Error(err, "Error getting VM for rebooting")
 	}
 	// Reboot VM
 	task, err := virtualMachine.Reboot(ctx)
 	if err != nil {
-		log.Log.Error(err, "Error rebooting VirtualMachine %s", ref.Name)
+		log.Log.Error(err, "Error rebooting VirtualMachine %s", vmName)
 	}
 	taskStatus, taskCompleted, taskErr := task.WaitForCompleteStatus(ctx, 5, 3)
 	if !taskStatus {
@@ -1494,21 +1490,21 @@ func (pc *ProxmoxClient) RebootVM(ref VMRef) error {
 }
 
 func (pc *ProxmoxClient) ApplyAdditionalConfiguration(vm Resource) error {
-	var ref VMRef
+	var vmName, nodeName string
 	var additionalConfig map[string]string
 	// vm could be either VirtualMachine or VirtualMachineTemplate
 	if vm.GetObjectKind().GroupVersionKind().Kind == "VirtualMachine" {
-		concrete := vm.(*proxmoxv1alpha1.VirtualMachine)
-		ref = VMRefFromCR(concrete)
-		additionalConfig = concrete.Spec.AdditionalConfig
+		vmName = vm.(*proxmoxv1alpha1.VirtualMachine).Spec.Name
+		nodeName = vm.(*proxmoxv1alpha1.VirtualMachine).Spec.NodeName
+		additionalConfig = vm.(*proxmoxv1alpha1.VirtualMachine).Spec.AdditionalConfig
 	} else if vm.GetObjectKind().GroupVersionKind().Kind == "VirtualMachineTemplate" {
-		concrete := vm.(*proxmoxv1alpha1.VirtualMachineTemplate)
-		ref = NamedVMRef(concrete.Spec.Name, concrete.Spec.NodeName)
-		additionalConfig = concrete.Spec.AdditionalConfig
+		vmName = vm.(*proxmoxv1alpha1.VirtualMachineTemplate).Spec.Name
+		nodeName = vm.(*proxmoxv1alpha1.VirtualMachineTemplate).Spec.NodeName
+		additionalConfig = vm.(*proxmoxv1alpha1.VirtualMachineTemplate).Spec.AdditionalConfig
 	}
 
 	// Get VirtualMachine
-	VirtualMachine, err := pc.getVirtualMachine(ref)
+	VirtualMachine, err := pc.getVirtualMachine(vmName, nodeName)
 	if err != nil {
 		log.Log.Error(err, "Error getting VM for applying additional configuration")
 		return err
@@ -1549,7 +1545,7 @@ func (pc *ProxmoxClient) ApplyAdditionalConfiguration(vm Resource) error {
 	}
 	if reboot {
 		// Reboot the VM
-		err = pc.RebootVM(ref)
+		err = pc.RebootVM(vmName, nodeName)
 		if err != nil {
 			log.Log.Error(err, "Error rebooting VirtualMachine")
 		}
@@ -1558,29 +1554,27 @@ func (pc *ProxmoxClient) ApplyAdditionalConfiguration(vm Resource) error {
 }
 
 func (pc *ProxmoxClient) IsVirtualMachineReady(obj Resource) (bool, error) {
-	var ref VMRef
+	var vmName, nodeName string
 	objectKind := obj.GetObjectKind()
 	switch objectKind.GroupVersionKind().Kind {
 	case "VirtualMachine":
-		ref = VMRefFromCR(obj.(*proxmoxv1alpha1.VirtualMachine))
+		vmName = obj.(*proxmoxv1alpha1.VirtualMachine).Spec.Name
+		nodeName = obj.(*proxmoxv1alpha1.VirtualMachine).Spec.NodeName
 	case "VirtualMachineTemplate":
-		tpl := obj.(*proxmoxv1alpha1.VirtualMachineTemplate)
-		ref = NamedVMRef(tpl.Spec.Name, tpl.Spec.NodeName)
+		vmName = obj.(*proxmoxv1alpha1.VirtualMachineTemplate).Spec.Name
+		nodeName = obj.(*proxmoxv1alpha1.VirtualMachineTemplate).Spec.NodeName
 	}
-	// Get VM ID. A machine that does not exist yet is not ready, which is not
-	// the same as an error — this used to be expressed as getVMID returning
-	// zero, and is now the not-found error it always meant.
-	vmID, err := pc.getVMID(ref)
+	// Get VM ID
+	vmID, err := pc.getVMID(vmName, nodeName)
 	if err != nil {
-		var notFound *NotFoundError
-		if errors.As(err, &notFound) {
-			return false, nil
-		}
 		return false, err
+	}
+	if vmID == 0 {
+		return false, nil
 	}
 
 	// Fetch fresh VM state from the API instead of using the cache.
-	node, err := pc.getNode(ctx, ref.Node)
+	node, err := pc.getNode(ctx, nodeName)
 	if err != nil {
 		return false, err
 	}
@@ -1646,20 +1640,4 @@ func getPciDevices(vm *proxmoxv1alpha1.VirtualMachine) []proxmoxv1alpha1.PciDevi
 		return vm.Spec.Template.PciDevices
 	}
 	return vm.Spec.VMSpec.PciDevices
-}
-
-// resolveNode fills in the node for a reference that does not carry one, by
-// finding the machine across the cluster. It is the one path where a bare name
-// decides which machine is meant, so GetNodeOfVM refuses rather than guesses
-// when the name is not unique.
-func (pc *ProxmoxClient) resolveNode(ref VMRef) (VMRef, error) {
-	if ref.Node != "" {
-		return ref, nil
-	}
-	nodeName, err := pc.GetNodeOfVM(ref.Name)
-	if err != nil {
-		return ref, err
-	}
-	ref.Node = nodeName
-	return ref, nil
 }

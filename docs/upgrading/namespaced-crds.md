@@ -90,4 +90,12 @@ kubectl scale deployment kubemox --replicas=1
 
 The restored objects describe machines that already exist. The operator finds each one by `spec.name` on the node in `spec.nodeName`, records its VMID in `status`, and manages it from there — nothing is cloned or recreated.
 
-The one case this cannot handle is a `spec.name` that matches more than one machine on the cluster. The operator refuses rather than picking, so if a restore reports an ambiguous name, rename one of the machines in Proxmox before retrying.
+## One machine, one object
+
+Proxmox addresses a machine by its name on a node, and a namespace scopes the Kubernetes object, not the machine behind it. Two `VirtualMachine` objects in different namespaces with the same `spec.name`, `spec.nodeName` and `spec.connectionRef` would therefore adopt one machine and reconcile it in turn.
+
+The operator refuses that: only the oldest of the objects that claim a machine is reconciled. The others get the condition `NameConflict=True` naming the owner, a `Warning` event, and are checked again every minute. They proceed on their own once the owner is deleted or renamed. Objects on another node, or through another connection, never conflict: a name only has to be unique per node and Proxmox cluster.
+
+```shell
+kubectl get vm -A -o custom-columns='NS:.metadata.namespace,NAME:.metadata.name,CONFLICT:.status.conditions[?(@.type=="NameConflict")].status'
+```
