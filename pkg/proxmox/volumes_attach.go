@@ -163,7 +163,7 @@ func (pc *ProxmoxClient) unusedSlotOf(ctx context.Context, node string, vmid int
 	if err != nil {
 		return "", err
 	}
-	for key, value := range vm.VirtualMachineConfig.MergeUnuseds() {
+	for key, value := range vm.VirtualMachineConfig.Unuseds {
 		if unusedVolid, _ := parseDriveValue(value); unusedVolid == volid {
 			return key, nil
 		}
