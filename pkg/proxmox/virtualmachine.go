@@ -782,12 +782,16 @@ func parseNetworkConfiguration(networks map[string]string) ([]proxmoxv1alpha1.Vi
 	return networkConfiguration, nil
 }
 
-func (pc *ProxmoxClient) ConfigureVirtualMachine(vm *proxmoxv1alpha1.VirtualMachine) error {
+// ConfigureVirtualMachine brings disks, networks and PCI devices in line with
+// the spec. reservedDevices are drive slots the own-disk code must leave
+// alone: the slots of VirtualMachineVolumes attached to this VM, which the
+// VirtualMachine controller moves on and off itself.
+func (pc *ProxmoxClient) ConfigureVirtualMachine(vm *proxmoxv1alpha1.VirtualMachine, reservedDevices ...string) error {
 	err := pc.configureVirtualMachineNetwork(vm)
 	if err != nil {
 		return err
 	}
-	err = pc.configureVirtualMachineDisk(vm)
+	err = pc.configureVirtualMachineDisk(vm, reservedDevices)
 	if err != nil {
 		return err
 	}
@@ -985,7 +989,8 @@ func (pc *ProxmoxClient) GetDiskConfiguration(vm *proxmoxv1alpha1.VirtualMachine
 	return disks, nil
 }
 
-func (pc *ProxmoxClient) configureVirtualMachineDisk(vm *proxmoxv1alpha1.VirtualMachine) error {
+func (pc *ProxmoxClient) configureVirtualMachineDisk(vm *proxmoxv1alpha1.VirtualMachine,
+	reservedDevices []string) error {
 	// Get VM disk spec and actual disk configuration
 	disks := getDisks(vm)
 	virtualMachineDisks, err := pc.GetDiskConfiguration(vm)
@@ -996,7 +1001,7 @@ func (pc *ProxmoxClient) configureVirtualMachineDisk(vm *proxmoxv1alpha1.Virtual
 	if err != nil {
 		return err
 	}
-	virtualMachineDisksParsed = withoutVolumeDevices(virtualMachineDisksParsed, allDisks(vm))
+	virtualMachineDisksParsed = withoutVolumeDevices(virtualMachineDisksParsed, allDisks(vm), reservedDevices...)
 
 	// Classify disk configurations
 	disksToAdd, disksToUpdate, disksToDelete := classifyDisks(disks, virtualMachineDisksParsed)

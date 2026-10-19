@@ -584,8 +584,19 @@ func (r *VirtualMachineReconciler) UpdateVirtualMachine(ctx context.Context,
 		}
 		return &dontRequeue, err
 	}
+	// The slots of volumes attached to this VM are not the own-disk code's to
+	// touch, including one whose ref the spec just dropped: it stays until the
+	// VM stops, and removing it here would unplug it as a stray disk.
+	attached, err := r.attachedVolumes(ctx, vm)
+	if err != nil {
+		return &dontRequeue, err
+	}
+	reserved := make([]string, 0, len(attached))
+	for _, vol := range attached {
+		reserved = append(reserved, vol.Status.Slot)
+	}
 	// ConfigureVirtualMachine is checks the delta for Disk and Network and updates the VM without a restart
-	err = pc.ConfigureVirtualMachine(vm)
+	err = pc.ConfigureVirtualMachine(vm, reserved...)
 	if err != nil {
 		logger.Error(err, "Failed to configure VirtualMachine")
 		var taskErr *proxmox.TaskError

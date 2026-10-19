@@ -36,14 +36,20 @@ func VolumeDisks(disks []proxmoxv1alpha1.VirtualMachineDisk) []proxmoxv1alpha1.V
 	return refs
 }
 
-// withoutVolumeDevices drops the slots that volumeRef drives occupy from the
-// disks read off Proxmox, so that the own-disk comparison does not try to
-// resize or delete a volume that merely visits the VM.
+// withoutVolumeDevices drops the slots that volumeRef drives occupy, and any
+// further reserved slots, from the disks read off Proxmox, so that the
+// own-disk comparison does not try to resize or delete a volume that merely
+// visits the VM. The reserved slots matter for a volume whose ref the spec
+// just dropped: it is still attached until the VM stops, and must not be
+// removed as a stray disk meanwhile.
 func withoutVolumeDevices(actual []proxmoxv1alpha1.VirtualMachineDisk,
-	spec []proxmoxv1alpha1.VirtualMachineDisk) []proxmoxv1alpha1.VirtualMachineDisk {
+	spec []proxmoxv1alpha1.VirtualMachineDisk, reserved ...string) []proxmoxv1alpha1.VirtualMachineDisk {
 	skip := map[string]bool{}
 	for _, d := range VolumeDisks(spec) {
 		skip[d.Device] = true
+	}
+	for _, device := range reserved {
+		skip[device] = true
 	}
 	kept := make([]proxmoxv1alpha1.VirtualMachineDisk, 0, len(actual))
 	for _, d := range actual {
@@ -112,8 +118,17 @@ func (pc *ProxmoxClient) DetachVolume(ctx context.Context, vm *proxmoxv1alpha1.V
 		return nil, "", "", err
 	}
 	if current == "" {
-		return nil, "", "", &NotFoundError{Message: fmt.Sprintf(
-			"device %s of VirtualMachine %s is empty; volume %s is not there to detach", device, vm.Spec.Name, vol.Name)}
+		// The drive may have been unplugged behind the controller's back, by
+		// hand or by an older operator; Proxmox then keeps the volume as an
+		// unusedN entry of the same VM, which can still be given back.
+		device, err = pc.unusedSlotOf(ctx, vm.Spec.NodeName, vmid, vol.Status.Volume)
+		if err != nil {
+			return nil, "", "", err
+		}
+		if device == "" {
+			return nil, "", "", &NotFoundError{Message: fmt.Sprintf(
+				"VirtualMachine %s has no drive holding volume %s any more", vm.Spec.Name, vol.Status.Volume)}
+		}
 	}
 
 	unlock := lockHolder(holder.VMID)
@@ -136,6 +151,24 @@ func (pc *ProxmoxClient) DetachVolume(ctx context.Context, vm *proxmoxv1alpha1.V
 
 func vmNotFound(vm *proxmoxv1alpha1.VirtualMachine) error {
 	return &NotFoundError{Message: fmt.Sprintf("VirtualMachine %s not found on node %s", vm.Spec.Name, vm.Spec.NodeName)}
+}
+
+// unusedSlotOf returns the unusedN key of a VM that holds the volume, or ""
+// when none does.
+func (pc *ProxmoxClient) unusedSlotOf(ctx context.Context, node string, vmid int, volid string) (string, error) {
+	if volid == "" {
+		return "", nil
+	}
+	vm, err := pc.diskVM(ctx, node, vmid)
+	if err != nil {
+		return "", err
+	}
+	for key, value := range vm.VirtualMachineConfig.Unuseds {
+		if unusedVolid, _ := parseDriveValue(value); unusedVolid == volid {
+			return key, nil
+		}
+	}
+	return "", nil
 }
 
 // invalidateVM drops a VM object from the name cache so the next read sees

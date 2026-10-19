@@ -67,6 +67,7 @@ const (
 	slotScsi0      = "scsi0"
 	slotScsi1      = "scsi1"
 	volData        = "data"
+	holderName     = "holder"
 )
 
 func newFakePVE() *fakePVE {
@@ -241,7 +242,9 @@ func (f *fakePVE) handleVM(w http.ResponseWriter, r *http.Request, node string, 
 	case sub == "/config" && r.Method == http.MethodGet:
 		cfg := map[string]any{}
 		for k, v := range vm.config {
-			if k == keyProtection {
+			// Proxmox returns these as numbers; the fake stored every
+			// parameter as a string.
+			if k == keyProtection || k == "cores" || k == "sockets" {
 				n, _ := strconv.Atoi(v)
 				cfg[k] = n
 				continue
@@ -528,12 +531,12 @@ func TestCreateHolderDiskRunsOutOfSlots(t *testing.T) {
 
 func TestMoveDiskRenamesVolumeAndSurvivesDestroy(t *testing.T) {
 	f := newFakePVE()
-	f.addVM(9998, fakeNode, "holder", map[string]string{keyProtection: "1"})
+	f.addVM(9998, fakeNode, holderName, map[string]string{keyProtection: "1"})
 	f.addVM(9999, fakeNode, "vm", nil)
 	f.addVM(9997, fakeOtherNode, "elsewhere", nil)
 	pc := newTestClient(t, f)
 	ctx := context.Background()
-	h := &DiskHolder{Name: "holder", VMID: 9998, Node: fakeNode}
+	h := &DiskHolder{Name: holderName, VMID: 9998, Node: fakeNode}
 
 	slot, volid, _, err := pc.CreateHolderDisk(ctx, h, fakeStorage, 10, "")
 	if err != nil {
@@ -586,10 +589,10 @@ func TestMoveDiskRenamesVolumeAndSurvivesDestroy(t *testing.T) {
 
 func TestDeleteHolderDiskTogglesProtectionAndFrees(t *testing.T) {
 	f := newFakePVE()
-	f.addVM(9998, fakeNode, "holder", map[string]string{keyProtection: "1"})
+	f.addVM(9998, fakeNode, holderName, map[string]string{keyProtection: "1"})
 	pc := newTestClient(t, f)
 	ctx := context.Background()
-	h := &DiskHolder{Name: "holder", VMID: 9998, Node: fakeNode}
+	h := &DiskHolder{Name: holderName, VMID: 9998, Node: fakeNode}
 
 	slot, volid, _, err := pc.CreateHolderDisk(ctx, h, fakeStorage, 3, "")
 	if err != nil {
@@ -714,5 +717,43 @@ func TestOwnDisksAndVolumeDevices(t *testing.T) {
 	}
 	if VolumeStorage("main-pool:vm-1-disk-0") != fakeStorage {
 		t.Fatal("VolumeStorage")
+	}
+}
+
+func TestReservedDevicesAndDetachFromUnused(t *testing.T) {
+	// The own-disk filter also keeps reserved slots: a volume whose ref the
+	// spec dropped is still attached until the VM stops.
+	spec := []proxmoxv1alpha1.VirtualMachineDisk{{Device: slotScsi0, Storage: fakeStorage, Size: 8}}
+	actual := []proxmoxv1alpha1.VirtualMachineDisk{
+		{Device: slotScsi0, Storage: fakeStorage, Size: 8},
+		{Device: slotScsi1, Storage: fakeStorage, Size: 4},
+	}
+	if kept := withoutVolumeDevices(actual, spec, slotScsi1); len(kept) != 1 || kept[0].Device != slotScsi0 {
+		t.Fatalf("withoutVolumeDevices with a reserved slot = %+v", kept)
+	}
+
+	// A volume unplugged behind the controller's back sits as unusedN on the
+	// VM; detaching finds it there and still gives it back to the holder.
+	f := newFakePVE()
+	f.addVM(9998, fakeNode, HolderName("tenant-a", fakeNode), map[string]string{keyProtection: "1"})
+	f.addVM(9999, fakeNode, "web", map[string]string{"unused0": "main-pool:vm-9999-disk-3"})
+	f.addVolume("main-pool:vm-9999-disk-3", 4)
+	pc := newTestClient(t, f)
+	vm := &proxmoxv1alpha1.VirtualMachine{Spec: proxmoxv1alpha1.VirtualMachineSpec{Name: "web", NodeName: fakeNode}}
+	vol := &proxmoxv1alpha1.VirtualMachineVolume{}
+	vol.Name = volData
+	vol.Namespace = "tenant-a"
+	vol.Spec.NodeName = fakeNode
+	vol.Status.Volume = "main-pool:vm-9999-disk-3"
+	vol.Status.Slot = slotScsi1
+	holder, slot, volid, err := pc.DetachVolume(context.Background(), vm, slotScsi1, vol)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if holder.VMID != 9998 || slot != slotScsi0 || volid != holderDisk0 {
+		t.Fatalf("detach from unused = %d %s %s", holder.VMID, slot, volid)
+	}
+	if _, still := f.vms[9999].config["unused0"]; still {
+		t.Fatal("VM still has the unused entry after detach")
 	}
 }
