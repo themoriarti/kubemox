@@ -36,6 +36,9 @@ const (
 	// proxmoxNameMaxLen is the longest name Proxmox accepts for a VM.
 	proxmoxNameMaxLen = 63
 
+	// configKeyName is the Proxmox config key of a VM's name.
+	configKeyName = "name"
+
 	// diskTaskPollInterval is how often a disk task is polled.
 	diskTaskPollInterval = 3 * time.Second
 	// diskConfigTimeout bounds the config changes that do not copy data.
@@ -126,7 +129,7 @@ func (pc *ProxmoxClient) EnsureDiskHolder(ctx context.Context, namespace, node s
 	}
 	name := HolderName(namespace, node)
 	options := []proxmox.VirtualMachineOption{
-		{Name: "name", Value: name},
+		{Name: configKeyName, Value: name},
 		{Name: "memory", Value: diskHolderMemoryMB},
 		{Name: "cores", Value: 1},
 		{Name: "protection", Value: 1},

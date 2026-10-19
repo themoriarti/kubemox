@@ -46,12 +46,28 @@ var (
 	reUnused = regexp.MustCompile(`^unused(\d+)$`)
 )
 
+// Names the fake and the tests share; constants so the linter does not ask
+// for them one occurrence at a time.
+const (
+	fakeNode       = "pve1"
+	fakeOtherNode  = "pve2"
+	fakeStorage    = "main-pool"
+	keyName        = "name"
+	keyStatus      = "status"
+	keyVMID        = "vmid"
+	keyProtection  = "protection"
+	stateStopped   = "stopped"
+	holderDisk0    = "main-pool:vm-9998-disk-0"
+	sampleVolume   = "vm-disks1:vm-1-disk-0"
+	templateVolume = "main-pool:base-9001-disk-0"
+)
+
 func newFakePVE() *fakePVE {
 	return &fakePVE{nextID: 100, vms: map[int]*fakeVM{}, volumes: map[string]int{}}
 }
 
 func (f *fakePVE) addVM(vmid int, node, name string, extra map[string]string) {
-	cfg := map[string]string{"name": name}
+	cfg := map[string]string{keyName: name}
 	for k, v := range extra {
 		cfg[k] = v
 	}
@@ -153,7 +169,7 @@ func (f *fakePVE) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case reTask.MatchString(r.URL.Path):
 		m := reTask.FindStringSubmatch(r.URL.Path)
 		writeJSON(w, map[string]any{
-			"status": "stopped", "exitstatus": "OK", "node": m[1], "upid": m[2],
+			keyStatus: stateStopped, "exitstatus": "OK", "node": m[1], "upid": m[2],
 			"type": "qmconfig", "user": "root@pam", "id": "0",
 		})
 	case reQemu.MatchString(r.URL.Path):
@@ -182,19 +198,19 @@ func (f *fakePVE) handleQemu(w http.ResponseWriter, r *http.Request, node string
 			if vm.node != node {
 				continue
 			}
-			list = append(list, map[string]any{"vmid": id, "name": vm.config["name"], "status": "stopped"})
+			list = append(list, map[string]any{keyVMID: id, keyName: vm.config[keyName], keyStatus: stateStopped})
 		}
 		writeJSON(w, list)
 	case http.MethodPost:
 		p := params(r)
-		vmid, _ := strconv.Atoi(p["vmid"])
+		vmid, _ := strconv.Atoi(p[keyVMID])
 		if _, exists := f.vms[vmid]; exists {
 			writeError(w, 500, fmt.Sprintf("unable to create VM %d: config file already exists", vmid))
 			return
 		}
 		cfg := map[string]string{}
 		for k, v := range p {
-			if k == "vmid" {
+			if k == keyVMID {
 				continue
 			}
 			cfg[k] = v
@@ -214,11 +230,11 @@ func (f *fakePVE) handleVM(w http.ResponseWriter, r *http.Request, node string, 
 	}
 	switch {
 	case sub == "/status/current" && r.Method == http.MethodGet:
-		writeJSON(w, map[string]any{"vmid": vmid, "name": vm.config["name"], "status": "stopped"})
+		writeJSON(w, map[string]any{keyVMID: vmid, keyName: vm.config[keyName], keyStatus: stateStopped})
 	case sub == "/config" && r.Method == http.MethodGet:
 		cfg := map[string]any{}
 		for k, v := range vm.config {
-			if k == "protection" {
+			if k == keyProtection {
 				n, _ := strconv.Atoi(v)
 				cfg[k] = n
 				continue
@@ -268,7 +284,7 @@ func (f *fakePVE) applyConfig(w http.ResponseWriter, vm *fakeVM, node string, vm
 		case key == "delete":
 			for _, k := range strings.Split(value, ",") {
 				if reDrive.MatchString(k) {
-					if vm.config["protection"] == "1" {
+					if vm.config[keyProtection] == "1" {
 						writeError(w, 500, fmt.Sprintf("can't remove drive '%s' - protection mode enabled", k))
 						return
 					}
@@ -277,7 +293,7 @@ func (f *fakePVE) applyConfig(w http.ResponseWriter, vm *fakeVM, node string, vm
 					}
 				}
 				if m := reUnused.FindStringSubmatch(k); m != nil {
-					if vm.config["protection"] == "1" {
+					if vm.config[keyProtection] == "1" {
 						writeError(w, 500, fmt.Sprintf("can't remove drive '%s' - protection mode enabled", k))
 						return
 					}
@@ -372,7 +388,7 @@ func newTestClient(t *testing.T, f *fakePVE) *ProxmoxClient {
 }
 
 func TestHolderName(t *testing.T) {
-	if got := HolderName("tenant-a", "pve1"); got != "kubemox-disks-tenant-a-pve1" {
+	if got := HolderName("tenant-a", fakeNode); got != "kubemox-disks-tenant-a-pve1" {
 		t.Fatalf("HolderName() = %q", got)
 	}
 	long := HolderName(strings.Repeat("n", 50), strings.Repeat("x", 30))
@@ -390,13 +406,13 @@ func TestParseDriveValue(t *testing.T) {
 		volid string
 		size  int
 	}{
-		{"main-pool:vm-9998-disk-0,size=10G", "main-pool:vm-9998-disk-0", 10},
-		{"main-pool:vm-9998-disk-0,discard=on,iothread=1,size=8G,ssd=1", "main-pool:vm-9998-disk-0", 8},
+		{holderDisk0 + ",size=10G", holderDisk0, 10},
+		{holderDisk0 + ",discard=on,iothread=1,size=8G,ssd=1", holderDisk0, 8},
 		{"local:iso/x.iso,media=cdrom,size=366K", "local:iso/x.iso", 1},
-		{"vm-disks1:vm-1-disk-0,size=512M", "vm-disks1:vm-1-disk-0", 1},
-		{"vm-disks1:vm-1-disk-0,size=2T", "vm-disks1:vm-1-disk-0", 2048},
-		{"vm-disks1:vm-1-disk-0,size=1048576", "vm-disks1:vm-1-disk-0", 1},
-		{"vm-disks1:vm-1-disk-0", "vm-disks1:vm-1-disk-0", 0},
+		{sampleVolume + ",size=512M", sampleVolume, 1},
+		{sampleVolume + ",size=2T", sampleVolume, 2048},
+		{sampleVolume + ",size=1048576", sampleVolume, 1},
+		{sampleVolume, sampleVolume, 0},
 	}
 	for _, tc := range cases {
 		volid, size := parseDriveValue(tc.in)
@@ -411,19 +427,19 @@ func TestEnsureDiskHolderCreatesOnceAndFinds(t *testing.T) {
 	pc := newTestClient(t, f)
 	ctx := context.Background()
 
-	h, err := pc.EnsureDiskHolder(ctx, "tenant-a", "pve1")
+	h, err := pc.EnsureDiskHolder(ctx, "tenant-a", fakeNode)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if h.Name != "kubemox-disks-tenant-a-pve1" || h.VMID != 100 || h.Node != "pve1" {
+	if h.Name != "kubemox-disks-tenant-a-pve1" || h.VMID != 100 || h.Node != fakeNode {
 		t.Fatalf("holder = %+v", h)
 	}
 	cfg := f.vms[100].config
-	if cfg["protection"] != "1" || !strings.Contains(cfg["tags"], DiskHolderTag) || cfg["net0"] != "" {
+	if cfg[keyProtection] != "1" || !strings.Contains(cfg["tags"], DiskHolderTag) || cfg["net0"] != "" {
 		t.Fatalf("holder config = %v", cfg)
 	}
 
-	again, err := pc.EnsureDiskHolder(ctx, "tenant-a", "pve1")
+	again, err := pc.EnsureDiskHolder(ctx, "tenant-a", fakeNode)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -431,14 +447,14 @@ func TestEnsureDiskHolderCreatesOnceAndFinds(t *testing.T) {
 		t.Fatalf("second call created a VM: %+v, %d VMs", again, len(f.vms))
 	}
 
-	other, err := pc.EnsureDiskHolder(ctx, "tenant-b", "pve1")
+	other, err := pc.EnsureDiskHolder(ctx, "tenant-b", fakeNode)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if other.VMID == h.VMID {
 		t.Fatal("two namespaces share one holder")
 	}
-	found, err := pc.FindDiskHolder(ctx, "tenant-c", "pve1")
+	found, err := pc.FindDiskHolder(ctx, "tenant-c", fakeNode)
 	if err != nil || found != nil {
 		t.Fatalf("FindDiskHolder for a namespace without one = %+v, %v", found, err)
 	}
@@ -446,36 +462,36 @@ func TestEnsureDiskHolderCreatesOnceAndFinds(t *testing.T) {
 
 func TestCreateHolderDiskBlankAndImport(t *testing.T) {
 	f := newFakePVE()
-	f.addVM(9998, "pve1", HolderName("tenant-a", "pve1"), map[string]string{"protection": "1"})
-	f.addVolume("main-pool:base-9001-disk-0", 8)
+	f.addVM(9998, fakeNode, HolderName("tenant-a", fakeNode), map[string]string{keyProtection: "1"})
+	f.addVolume(templateVolume, 8)
 	pc := newTestClient(t, f)
 	ctx := context.Background()
-	h := &DiskHolder{Name: HolderName("tenant-a", "pve1"), VMID: 9998, Node: "pve1"}
+	h := &DiskHolder{Name: HolderName("tenant-a", fakeNode), VMID: 9998, Node: fakeNode}
 
-	slot, volid, size, err := pc.CreateHolderDisk(ctx, h, "main-pool", 5, "")
+	slot, volid, size, err := pc.CreateHolderDisk(ctx, h, fakeStorage, 5, "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if slot != "scsi0" || volid != "main-pool:vm-9998-disk-0" || size != 5 {
+	if slot != "scsi0" || volid != holderDisk0 || size != 5 {
 		t.Fatalf("blank disk = %s %s %d", slot, volid, size)
 	}
 
 	// An import copies the 8G source and is then grown to the 20G asked for;
 	// it lands in the next free slot even though protection is on.
-	slot, volid, size, err = pc.CreateHolderDisk(ctx, h, "main-pool", 20, "main-pool:base-9001-disk-0")
+	slot, volid, size, err = pc.CreateHolderDisk(ctx, h, fakeStorage, 20, templateVolume)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if slot != "scsi1" || volid != "main-pool:vm-9998-disk-1" || size != 20 || f.volumes[volid] != 20 {
 		t.Fatalf("imported disk = %s %s %d (fake size %d)", slot, volid, size, f.volumes[volid])
 	}
-	if f.vms[9998].config["protection"] != "1" {
+	if f.vms[9998].config[keyProtection] != "1" {
 		t.Fatal("protection was dropped while creating a disk")
 	}
 
 	// A source smaller than the request is grown; one at least as large is
 	// left alone, never shrunk.
-	slot, _, size, err = pc.CreateHolderDisk(ctx, h, "main-pool", 4, "main-pool:base-9001-disk-0")
+	slot, _, size, err = pc.CreateHolderDisk(ctx, h, fakeStorage, 4, templateVolume)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -483,7 +499,7 @@ func TestCreateHolderDiskBlankAndImport(t *testing.T) {
 		t.Fatalf("imported disk smaller than its source = %s %d", slot, size)
 	}
 
-	if _, _, _, err = pc.CreateHolderDisk(ctx, h, "main-pool", 1, "main-pool:does-not-exist"); err == nil {
+	if _, _, _, err = pc.CreateHolderDisk(ctx, h, fakeStorage, 1, "main-pool:does-not-exist"); err == nil {
 		t.Fatal("import from a missing volume succeeded")
 	}
 }
@@ -494,10 +510,10 @@ func TestCreateHolderDiskRunsOutOfSlots(t *testing.T) {
 	for _, slot := range diskHolderSlots {
 		extra[slot] = "main-pool:vm-9998-disk-x,size=1G"
 	}
-	f.addVM(9998, "pve1", "h", extra)
+	f.addVM(9998, fakeNode, "h", extra)
 	pc := newTestClient(t, f)
-	h := &DiskHolder{Name: "h", VMID: 9998, Node: "pve1"}
-	_, _, _, err := pc.CreateHolderDisk(context.Background(), h, "main-pool", 1, "")
+	h := &DiskHolder{Name: "h", VMID: 9998, Node: fakeNode}
+	_, _, _, err := pc.CreateHolderDisk(context.Background(), h, fakeStorage, 1, "")
 	if err == nil || !strings.Contains(err.Error(), "no free drive slot") {
 		t.Fatalf("err = %v", err)
 	}
@@ -505,21 +521,21 @@ func TestCreateHolderDiskRunsOutOfSlots(t *testing.T) {
 
 func TestMoveDiskRenamesVolumeAndSurvivesDestroy(t *testing.T) {
 	f := newFakePVE()
-	f.addVM(9998, "pve1", "holder", map[string]string{"protection": "1"})
-	f.addVM(9999, "pve1", "vm", nil)
-	f.addVM(9997, "pve2", "elsewhere", nil)
+	f.addVM(9998, fakeNode, "holder", map[string]string{keyProtection: "1"})
+	f.addVM(9999, fakeNode, "vm", nil)
+	f.addVM(9997, fakeOtherNode, "elsewhere", nil)
 	pc := newTestClient(t, f)
 	ctx := context.Background()
-	h := &DiskHolder{Name: "holder", VMID: 9998, Node: "pve1"}
+	h := &DiskHolder{Name: "holder", VMID: 9998, Node: fakeNode}
 
-	slot, volid, _, err := pc.CreateHolderDisk(ctx, h, "main-pool", 10, "")
+	slot, volid, _, err := pc.CreateHolderDisk(ctx, h, fakeStorage, 10, "")
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	// Reassign from the protected holder to the VM: allowed, and the volume
 	// takes the new owner's name.
-	moved, err := pc.MoveDisk(ctx, "pve1", 9998, slot, 9999, "scsi0")
+	moved, err := pc.MoveDisk(ctx, fakeNode, 9998, slot, 9999, "scsi0")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -533,7 +549,7 @@ func TestMoveDiskRenamesVolumeAndSurvivesDestroy(t *testing.T) {
 	// Across nodes Proxmox refuses before doing anything. The client hides
 	// the message behind the 500 status, so only the refusal is asserted,
 	// plus that the drive stayed where it was.
-	if _, err = pc.MoveDisk(ctx, "pve1", 9999, "scsi0", 9997, "scsi0"); err == nil {
+	if _, err = pc.MoveDisk(ctx, fakeNode, 9999, "scsi0", 9997, "scsi0"); err == nil {
 		t.Fatal("cross-node move succeeded")
 	}
 	if _, still := f.vms[9999].config["scsi0"]; !still {
@@ -541,11 +557,11 @@ func TestMoveDiskRenamesVolumeAndSurvivesDestroy(t *testing.T) {
 	}
 
 	// Back to the holder, then destroy the VM: the returned volume survives.
-	back, err := pc.MoveDisk(ctx, "pve1", 9999, "scsi0", 9998, slot)
+	back, err := pc.MoveDisk(ctx, fakeNode, 9999, "scsi0", 9998, slot)
 	if err != nil {
 		t.Fatal(err)
 	}
-	vm, err := pc.diskVM(ctx, "pve1", 9999)
+	vm, err := pc.diskVM(ctx, fakeNode, 9999)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -555,7 +571,7 @@ func TestMoveDiskRenamesVolumeAndSurvivesDestroy(t *testing.T) {
 	if _, ok := f.volumes[back]; !ok {
 		t.Fatalf("volume %s did not survive the VM destroy", back)
 	}
-	got, size, err := pc.ReadDisk(ctx, "pve1", 9998, slot)
+	got, size, err := pc.ReadDisk(ctx, fakeNode, 9998, slot)
 	if err != nil || got != back || size != 10 {
 		t.Fatalf("ReadDisk after return = %q %d %v", got, size, err)
 	}
@@ -563,12 +579,12 @@ func TestMoveDiskRenamesVolumeAndSurvivesDestroy(t *testing.T) {
 
 func TestDeleteHolderDiskTogglesProtectionAndFrees(t *testing.T) {
 	f := newFakePVE()
-	f.addVM(9998, "pve1", "holder", map[string]string{"protection": "1"})
+	f.addVM(9998, fakeNode, "holder", map[string]string{keyProtection: "1"})
 	pc := newTestClient(t, f)
 	ctx := context.Background()
-	h := &DiskHolder{Name: "holder", VMID: 9998, Node: "pve1"}
+	h := &DiskHolder{Name: "holder", VMID: 9998, Node: fakeNode}
 
-	slot, volid, _, err := pc.CreateHolderDisk(ctx, h, "main-pool", 3, "")
+	slot, volid, _, err := pc.CreateHolderDisk(ctx, h, fakeStorage, 3, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -582,7 +598,7 @@ func TestDeleteHolderDiskTogglesProtectionAndFrees(t *testing.T) {
 		t.Fatalf("freed = %v", f.freed)
 	}
 	cfg := f.vms[9998].config
-	if cfg["protection"] != "1" {
+	if cfg[keyProtection] != "1" {
 		t.Fatal("protection not restored after delete")
 	}
 	for k := range cfg {
