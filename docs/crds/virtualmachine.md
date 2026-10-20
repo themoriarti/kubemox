@@ -176,6 +176,7 @@ EOF
 ## Attaching a VirtualMachineVolume
 
 A drive in `disk` is either a disk the VM owns, given by `storage` and `size`, or a [`VirtualMachineVolume`](virtualmachinevolume.md) from the same namespace attached at the device by `volumeRef`:
+## VLANs and addresses from Cluster API IPAM
 
 ```yaml
 spec:
@@ -217,3 +218,43 @@ spec:
 - `powerState` says what the operator does about the machine's power: `Running` starts it whenever it is found stopped, `Stopped` stops it whenever it is found running, `Manual` never touches the power and only keeps the configuration. It takes precedence over `enableAutoStart`, and unlike that boolean an explicit value does not get lost on an update.
 - `pool` and the firmware disks (`efiDisk`, `tpm`) are applied when the machine is created and left alone afterwards. `bios`, `machine`, `scsiController`, `smbiosUUID` and `tags` are kept in line on every reconcile; a changed BIOS or UUID applies on the next boot, nothing restarts the machine for it. Tags present on the machine but not listed are left alone.
 - A new `smbiosUUID` is what cloud-init takes as a new instance, so it runs again on the next boot.
+    network:
+      - model: virtio
+        bridge: vmbr70
+        vlan: 101
+        ipAddressClaimRef:
+          name: web-0
+```
+
+`vlan` tags the port on the bridge. `ipAddressClaimRef` names an `IPAddressClaim` (`ipam.cluster.x-k8s.io/v1beta1`) in the same namespace; once an IPAM provider binds it to an `IPAddress`, the address, prefix and gateway are written into the matching `ipconfigN` of the machine, which a cloud-init drive turns into the guest's network configuration. Until every claimed port has its address the machine is not started, and the `NetworkReady` condition says which claim it waits for. `status.networks` lists each port with its MAC and the address it got.
+
+Changing a port's bridge or VLAN keeps its MAC: the guest sees the same network card on another network, not a new card. The operator only reads the IPAM objects; it does not create claims, and on a cluster without the IPAM CRDs a ref is reported as `IPAMUnavailable`.
+
+## cloud-init from a Secret (NoCloud)
+
+```yaml
+apiVersion: v1
+kind: Secret
+metadata:
+  name: web-cloud-init
+stringData:
+  user-data: |
+    #cloud-config
+    users:
+      - name: admin
+        ssh_authorized_keys: [ssh-ed25519 AAAA...]
+---
+spec:
+  vmSpec:
+    cloudInit:
+      secretRef:
+        name: web-cloud-init
+      device: ide2          # default
+      nameservers: [10.0.0.1]
+```
+
+`cloudInit` builds a NoCloud ISO from the Secret — `user-data` (required), `meta-data`, `network-config`, `vendor-data` — uploads it through the Proxmox API to the node's ISO storage as `user-data-<vmid>.iso` and attaches it at `device`. No snippet file on the node is involved, which is what `cloudInitConfig`, Proxmox's own cloud-init drive, would need for arbitrary user-data; the two are exclusive.
+
+A missing `meta-data` is generated with the machine's name as hostname and an instance id derived from the content, so a change to the Secret gives cloud-init a new instance and it runs again on the guest's next boot; the operator does not reboot the guest. A missing `network-config` is generated from the ports that got an address through an `ipAddressClaimRef`, matched by MAC, with `nameservers` as the resolvers. `status.cloudInit` records the hash, instance id and device of the attached ISO; the ISO is removed with the machine.
+
+Rebuilding the ISO needs `Datastore.Allocate` on the ISO storage for the token (the first upload only needs `Datastore.AllocateTemplate`).

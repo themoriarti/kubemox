@@ -203,7 +203,7 @@ func (pc *ProxmoxClient) SetBootOrder(vmName, nodeName string) error {
 	}
 	// Set boot order
 	task, err := VirtualMachine.Config(ctx, proxmox.VirtualMachineOption{
-		Name: "boot",
+		Name: optionBoot,
 		// TODO: SCSI0 should be retrieved from external resource
 		Value: "order=scsi0",
 	})
