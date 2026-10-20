@@ -506,6 +506,20 @@ spec:
                         description: Machine is the QEMU machine type, such as q35.
                           Empty keeps the Proxmox default (i440fx).
                         type: string
+                      scsiController:
+                        description: |-
+                          SCSIController is the SCSI controller model (scsihw): virtio-scsi-single,
+                          virtio-scsi-pci, lsi, lsi53c810, megasas or pvscsi. Empty keeps the
+                          Proxmox default (lsi), which a cloud image built for virtio-scsi, such
+                          as Ubuntu's, cannot boot from.
+                        enum:
+                        - virtio-scsi-single
+                        - virtio-scsi-pci
+                        - lsi
+                        - lsi53c810
+                        - megasas
+                        - pvscsi
+                        type: string
                       tpm:
                         description: TPM is a TPM state disk. It is created with the
                           machine and left alone afterwards.
@@ -526,6 +540,14 @@ spec:
                         - storage
                         type: object
                     type: object
+                  guestAgent:
+                    default: false
+                    description: |-
+                      GuestAgent enables the QEMU guest agent channel (agent=1). Without it
+                      Proxmox cannot ask the guest for its addresses or run commands in it,
+                      and the operator's status shows no IP. A clone inherits the template's
+                      setting; a machine built from scratch has it off unless set here.
+                    type: boolean
                   memory:
                     description: Memory is the amount of memory in MB
                     minimum: 16

@@ -671,6 +671,9 @@ func TestAttachAndDetachVolume(t *testing.T) {
 	if _, still := f.vms[9998].config[slot]; still {
 		t.Fatal("holder still has the slot after attach")
 	}
+	if f.vms[9999].config["boot"] != "order=scsi1" {
+		t.Fatalf("boot order after attach = %q", f.vms[9999].config["boot"])
+	}
 	// Attaching again is a no-op once the device holds that volume.
 	vol.Status.Volume = attached
 	if again, err := pc.AttachVolume(ctx, vm, slotScsi1, vol); err != nil || again != attached {
@@ -756,5 +759,20 @@ func TestReservedDevicesAndDetachFromUnused(t *testing.T) {
 	}
 	if _, still := f.vms[9999].config["unused0"]; still {
 		t.Fatal("VM still has the unused entry after detach")
+	}
+}
+
+func TestBootOrderWith(t *testing.T) {
+	cases := []struct{ boot, device, want string }{
+		{"", slotScsi0, "order=scsi0"},
+		{"cdn", slotScsi0, "order=scsi0"},
+		{"order=ide0;net0", slotScsi0, "order=scsi0;ide0;net0"},
+		{"order=scsi0;ide2", slotScsi0, "order=scsi0;ide2"},
+		{"order=ide2;scsi0", slotScsi0, "order=ide2;scsi0"},
+	}
+	for _, tc := range cases {
+		if got := bootOrderWith(tc.boot, tc.device); got != tc.want {
+			t.Errorf("bootOrderWith(%q, %q) = %q, want %q", tc.boot, tc.device, got, tc.want)
+		}
 	}
 }

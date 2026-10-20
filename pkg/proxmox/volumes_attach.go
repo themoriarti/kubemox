@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/luthermonson/go-proxmox"
+
 	proxmoxv1alpha1 "github.com/alperencelik/kubemox/api/proxmox/v1alpha1"
 )
 
@@ -94,7 +96,50 @@ func (pc *ProxmoxClient) AttachVolume(ctx context.Context, vm *proxmoxv1alpha1.V
 	}
 	// The VM config changed behind the name cache.
 	pc.invalidateVM(vm.Spec.NodeName, vmid)
+	if err = pc.ensureBootable(ctx, vm.Spec.NodeName, vmid, device); err != nil {
+		return volid, err
+	}
 	return volid, nil
+}
+
+// ensureBootable puts a freshly attached drive at the head of the boot order
+// when it is not in it yet. Proxmox writes the boot order at creation from the
+// devices present then; a volume attached afterwards, which is often the OS
+// disk, would otherwise never be tried.
+func (pc *ProxmoxClient) ensureBootable(ctx context.Context, node string, vmid int, device string) error {
+	vm, err := pc.diskVM(ctx, node, vmid)
+	if err != nil {
+		return err
+	}
+	order := bootOrderWith(vm.VirtualMachineConfig.Boot, device)
+	if order == vm.VirtualMachineConfig.Boot {
+		return nil
+	}
+	task, err := vm.Config(ctx, proxmox.VirtualMachineOption{Name: "boot", Value: order})
+	if err != nil {
+		return fmt.Errorf("putting %s into the boot order of VM %d: %w", device, vmid, err)
+	}
+	if err = waitDiskTask(ctx, task, diskConfigTimeout); err != nil {
+		return fmt.Errorf("putting %s into the boot order of VM %d: %w", device, vmid, err)
+	}
+	pc.invalidateVM(node, vmid)
+	return nil
+}
+
+// bootOrderWith returns the boot order with device first, unchanged when the
+// device is already listed. An empty or legacy (non "order=") value is
+// replaced by one that only names the device.
+func bootOrderWith(boot, device string) string {
+	if !strings.HasPrefix(boot, "order=") {
+		return "order=" + device
+	}
+	listed := strings.Split(strings.TrimPrefix(boot, "order="), ";")
+	for _, d := range listed {
+		if d == device {
+			return boot
+		}
+	}
+	return "order=" + strings.Join(append([]string{device}, listed...), ";")
 }
 
 // DetachVolume reassigns a volume from the VM's device back to its holder,

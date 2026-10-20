@@ -24,6 +24,8 @@ const (
 	optionSMBIOS  = "smbios1"
 	optionBios    = "bios"
 	optionMachine = "machine"
+	optionSCSIHW  = "scsihw"
+	optionAgent   = "agent"
 	optionEFIDisk = "efidisk0"
 	optionTPM     = "tpmstate0"
 	// optionDelete is the config key that removes other keys.
@@ -75,6 +77,9 @@ func creationOptions(vm *proxmoxv1alpha1.VirtualMachine) []proxmox.VirtualMachin
 // spec sets it, so a machine without them keeps whatever Proxmox chose.
 func identityOptions(vm *proxmoxv1alpha1.VirtualMachine) []proxmox.VirtualMachineOption {
 	opts := []proxmox.VirtualMachineOption{}
+	if vm.Spec.VMSpec != nil && vm.Spec.VMSpec.GuestAgent {
+		opts = append(opts, proxmox.VirtualMachineOption{Name: optionAgent, Value: "1"})
+	}
 	if vm.Spec.VMSpec != nil && vm.Spec.VMSpec.SMBIOSUUID != "" {
 		opts = append(opts, proxmox.VirtualMachineOption{
 			Name: optionSMBIOS, Value: "uuid=" + strings.ToLower(vm.Spec.VMSpec.SMBIOSUUID),
@@ -86,6 +91,9 @@ func identityOptions(vm *proxmoxv1alpha1.VirtualMachine) []proxmox.VirtualMachin
 		}
 		if fw.Machine != "" {
 			opts = append(opts, proxmox.VirtualMachineOption{Name: optionMachine, Value: fw.Machine})
+		}
+		if fw.SCSIController != "" {
+			opts = append(opts, proxmox.VirtualMachineOption{Name: optionSCSIHW, Value: fw.SCSIController})
 		}
 	}
 	return opts
@@ -133,6 +141,17 @@ func identityDrift(vm *proxmoxv1alpha1.VirtualMachine,
 			}
 		case optionMachine:
 			have = cfg.Machine
+		case optionSCSIHW:
+			have = "lsi"
+			if cfg.SCSIHW != nil && *cfg.SCSIHW != "" {
+				have = *cfg.SCSIHW
+			}
+		case optionAgent:
+			// Proxmox reports "1" or "enabled=1,..." for an enabled agent.
+			have = "0"
+			if a := cfg.Agent; a == "1" || strings.HasPrefix(a, "enabled=1") || strings.HasPrefix(a, "1,") {
+				have = "1"
+			}
 		}
 		if !strings.EqualFold(have, want) {
 			drift = append(drift, opt)

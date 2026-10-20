@@ -161,6 +161,13 @@ type NewVMSpec struct {
 	// Firmware selects BIOS or UEFI, the EFI vars disk, a TPM and the machine type.
 	// +optional
 	Firmware *VirtualMachineFirmware `json:"firmware,omitempty"`
+	// GuestAgent enables the QEMU guest agent channel (agent=1). Without it
+	// Proxmox cannot ask the guest for its addresses or run commands in it,
+	// and the operator's status shows no IP. A clone inherits the template's
+	// setting; a machine built from scratch has it off unless set here.
+	// +kubebuilder:default:=false
+	// +optional
+	GuestAgent bool `json:"guestAgent,omitempty"`
 	// CloudInit feeds the guest a NoCloud datasource built from a Secret:
 	// an ISO with the Secret's user-data, meta-data, network-config and
 	// vendor-data, uploaded through the Proxmox API and attached at Device.
@@ -180,6 +187,13 @@ type VirtualMachineFirmware struct {
 	// Machine is the QEMU machine type, such as q35. Empty keeps the Proxmox default (i440fx).
 	// +optional
 	Machine string `json:"machine,omitempty"`
+	// SCSIController is the SCSI controller model (scsihw): virtio-scsi-single,
+	// virtio-scsi-pci, lsi, lsi53c810, megasas or pvscsi. Empty keeps the
+	// Proxmox default (lsi), which a cloud image built for virtio-scsi, such
+	// as Ubuntu's, cannot boot from.
+	// +kubebuilder:validation:Enum=virtio-scsi-single;virtio-scsi-pci;lsi;lsi53c810;megasas;pvscsi
+	// +optional
+	SCSIController string `json:"scsiController,omitempty"`
 	// EFIDisk is the EFI vars disk ovmf needs. It is created with the machine
 	// and left alone afterwards.
 	// +optional

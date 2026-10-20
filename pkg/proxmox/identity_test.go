@@ -29,20 +29,24 @@ func TestCreationOptions(t *testing.T) {
 	vm.Spec.Tags = []string{testTag, virtualMachineTag, testTag, ""}
 	vm.Spec.VMSpec = &proxmoxv1alpha1.NewVMSpec{
 		SMBIOSUUID: "0D9C1E2A-1111-4222-8333-444455556666",
+		GuestAgent: true,
 		Firmware: &proxmoxv1alpha1.VirtualMachineFirmware{
-			Bios:    "ovmf",
-			Machine: testMachine,
-			EFIDisk: &proxmoxv1alpha1.VirtualMachineEFIDisk{Storage: "local-zfs", PreEnrolledKeys: true},
-			TPM:     &proxmoxv1alpha1.VirtualMachineTPM{Storage: "local-zfs"},
+			Bios:           "ovmf",
+			Machine:        testMachine,
+			SCSIController: "virtio-scsi-single",
+			EFIDisk:        &proxmoxv1alpha1.VirtualMachineEFIDisk{Storage: "local-zfs", PreEnrolledKeys: true},
+			TPM:            &proxmoxv1alpha1.VirtualMachineTPM{Storage: "local-zfs"},
 		},
 	}
 	got := optionMap(creationOptions(vm))
 	want := map[string]string{
 		"pool":      testNamespace,
+		"agent":     "1",
 		"tags":      "kubemox;web",
 		"smbios1":   "uuid=0d9c1e2a-1111-4222-8333-444455556666",
 		"bios":      "ovmf",
 		"machine":   testMachine,
+		"scsihw":    "virtio-scsi-single",
 		"efidisk0":  "local-zfs:1,efitype=4m,pre-enrolled-keys=1",
 		"tpmstate0": "local-zfs:1,version=v2.0",
 	}
