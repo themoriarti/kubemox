@@ -30,6 +30,8 @@ const (
 	optionTPM     = "tpmstate0"
 	// optionDelete is the config key that removes other keys.
 	optionDelete = "delete"
+	// optionBoot is the boot order key.
+	optionBoot = "boot"
 
 	identityConfigTimeout = 5 * time.Minute
 	identityPollInterval  = 2 * time.Second

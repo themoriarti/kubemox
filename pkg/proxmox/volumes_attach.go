@@ -115,7 +115,7 @@ func (pc *ProxmoxClient) ensureBootable(ctx context.Context, node string, vmid i
 	if order == vm.VirtualMachineConfig.Boot {
 		return nil
 	}
-	task, err := vm.Config(ctx, proxmox.VirtualMachineOption{Name: "boot", Value: order})
+	task, err := vm.Config(ctx, proxmox.VirtualMachineOption{Name: optionBoot, Value: order})
 	if err != nil {
 		return fmt.Errorf("putting %s into the boot order of VM %d: %w", device, vmid, err)
 	}

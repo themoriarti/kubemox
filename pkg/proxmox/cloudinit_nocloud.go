@@ -136,7 +136,7 @@ func (pc *ProxmoxClient) ensureBootOrder(virtualMachine *proxmox.VirtualMachine)
 	if first == "" {
 		return nil
 	}
-	task, err := virtualMachine.Config(ctx, proxmox.VirtualMachineOption{Name: "boot", Value: "order=" + first})
+	task, err := virtualMachine.Config(ctx, proxmox.VirtualMachineOption{Name: optionBoot, Value: "order=" + first})
 	if err != nil {
 		return fmt.Errorf("setting the boot order of VM %d: %w", virtualMachine.VMID, err)
 	}
