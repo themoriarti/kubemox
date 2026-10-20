@@ -52,9 +52,24 @@ type VirtualMachineSpec struct {
 	DeletionProtection bool `json:"deletionProtection,omitempty"`
 	// EnableAutoStart is a flag that indicates whether the VM should automatically start when it's powered off.
 	// If true, the VM will start automatically when it's powered off.
-	// If not set, it defaults to true.
+	// If not set, it defaults to true. PowerState, when set, takes precedence.
 	// +kubebuilder:default:=true
 	EnableAutoStart bool `json:"enableAutoStart,omitempty"`
+	// PowerState is what the operator does about the machine's power.
+	// Running starts it whenever it is found stopped, Stopped stops it whenever
+	// it is found running, Manual leaves the power alone and only keeps the
+	// configuration. Unset keeps the EnableAutoStart behaviour.
+	// +kubebuilder:validation:Enum=Running;Stopped;Manual
+	// +optional
+	PowerState PowerState `json:"powerState,omitempty"`
+	// Pool is the Proxmox resource pool the machine is created in. It is
+	// applied at creation; a change afterwards is not applied.
+	// +optional
+	Pool string `json:"pool,omitempty"`
+	// Tags are Proxmox tags kept on the machine next to the operator's own
+	// tag. Tags present on the machine but not listed here are left alone.
+	// +optional
+	Tags []string `json:"tags,omitempty"`
 	// AdditionalConfig is the additional configuration of the VM
 	// +kubebuilder:validation:Optional
 	AdditionalConfig map[string]string `json:"additionalConfig,omitempty"`
@@ -71,6 +86,18 @@ type VirtualMachineSpec struct {
 	// +kubebuilder:validation:Required
 	ConnectionRef *corev1.LocalObjectReference `json:"connectionRef,omitempty"`
 }
+
+// PowerState is what the operator does about a machine's power.
+type PowerState string
+
+const (
+	// PowerStateRunning starts the machine whenever it is found stopped.
+	PowerStateRunning PowerState = "Running"
+	// PowerStateStopped stops the machine whenever it is found running.
+	PowerStateStopped PowerState = "Stopped"
+	// PowerStateManual leaves the power alone and only keeps the configuration.
+	PowerStateManual PowerState = "Manual"
+)
 
 // CloneMode selects between a full copy of the template's disks and a linked
 // clone that references the template's base snapshot.
@@ -102,6 +129,9 @@ func (c CloneMode) CloneFlag() uint8 {
 // *corev1.TypedLocalObjectReference `json:"connectionRef,omitempty"`
 // }
 
+// +kubebuilder:validation:XValidation:rule="!(has(self.cloudInit) && has(self.cloudInitConfig))",message="cloudInit (a NoCloud ISO from a Secret) and cloudInitConfig (Proxmox's own cloud-init drive) are two datasources; set one"
+//
+//nolint:lll // CEL validation rule is too long
 type NewVMSpec struct {
 	// Cores is the number of CPU cores
 	// +kubebuilder:validation:Minimum=1
@@ -123,6 +153,92 @@ type NewVMSpec struct {
 	PciDevices []PciDevice `json:"pciDevices,omitempty"`
 	// Cloud Init Config
 	CloudInitConfig *CloudInitConfig `json:"cloudInitConfig,omitempty"`
+	// SMBIOSUUID sets the UUID in smbios1. Cloud-init takes it as the
+	// instance identity, so a new value makes it run again on the next boot.
+	// +kubebuilder:validation:Pattern=`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`
+	// +optional
+	SMBIOSUUID string `json:"smbiosUUID,omitempty"`
+	// Firmware selects BIOS or UEFI, the EFI vars disk, a TPM and the machine type.
+	// +optional
+	Firmware *VirtualMachineFirmware `json:"firmware,omitempty"`
+	// CloudInit feeds the guest a NoCloud datasource built from a Secret:
+	// an ISO with the Secret's user-data, meta-data, network-config and
+	// vendor-data, uploaded through the Proxmox API and attached at Device.
+	// Unlike cloudInitConfig it carries arbitrary user-data without a
+	// snippet file on the node. A change to the Secret rebuilds the ISO with
+	// a new instance id; the guest applies it on its next boot.
+	// +optional
+	CloudInit *CloudInitSource `json:"cloudInit,omitempty"`
+}
+
+// VirtualMachineFirmware is the firmware side of a machine built from scratch.
+type VirtualMachineFirmware struct {
+	// Bios is seabios (the Proxmox default) or ovmf for UEFI.
+	// +kubebuilder:validation:Enum=seabios;ovmf
+	// +optional
+	Bios string `json:"bios,omitempty"`
+	// Machine is the QEMU machine type, such as q35. Empty keeps the Proxmox default (i440fx).
+	// +optional
+	Machine string `json:"machine,omitempty"`
+	// EFIDisk is the EFI vars disk ovmf needs. It is created with the machine
+	// and left alone afterwards.
+	// +optional
+	EFIDisk *VirtualMachineEFIDisk `json:"efiDisk,omitempty"`
+	// TPM is a TPM state disk. It is created with the machine and left alone afterwards.
+	// +optional
+	TPM *VirtualMachineTPM `json:"tpm,omitempty"`
+}
+
+// VirtualMachineEFIDisk is the efidisk0 of a UEFI machine.
+type VirtualMachineEFIDisk struct {
+	// Storage the EFI vars disk is allocated on.
+	// +kubebuilder:validation:MinLength=1
+	Storage string `json:"storage"`
+	// PreEnrolledKeys enrolls the Microsoft Secure Boot keys, which is what a
+	// Secure Boot guest expects. Off leaves Secure Boot disabled.
+	// +kubebuilder:default:=false
+	PreEnrolledKeys bool `json:"preEnrolledKeys,omitempty"`
+}
+
+// VirtualMachineTPM is the tpmstate0 of a machine.
+type VirtualMachineTPM struct {
+	// Storage the TPM state disk is allocated on.
+	// +kubebuilder:validation:MinLength=1
+	Storage string `json:"storage"`
+	// Version is the TPM version: v2.0 (default) or v1.2.
+	// +kubebuilder:validation:Enum=v1.2;v2.0
+	// +kubebuilder:default:="v2.0"
+	// +optional
+	Version string `json:"version,omitempty"`
+}
+
+// CloudInitSource is where a NoCloud datasource comes from.
+type CloudInitSource struct {
+	// SecretRef names a Secret in this namespace. Keys: user-data (required),
+	// and optionally meta-data, network-config and vendor-data. A missing
+	// meta-data is generated with an instance id derived from the content
+	// and the machine's name as hostname; a missing network-config is
+	// generated from the ports that got an address through an
+	// IPAddressClaim, matched by MAC, when there are any.
+	SecretRef corev1.LocalObjectReference `json:"secretRef"`
+	// Device the ISO is attached at.
+	// +kubebuilder:default:="ide2"
+	// +optional
+	Device string `json:"device,omitempty"`
+	// Nameservers written into the generated network-config. Ignored when
+	// the Secret carries its own network-config.
+	// +optional
+	Nameservers []string `json:"nameservers,omitempty"`
+}
+
+// VirtualMachineCloudInitStatus records the datasource the machine has.
+type VirtualMachineCloudInitStatus struct {
+	// Hash of the content the attached ISO was built from.
+	Hash string `json:"hash,omitempty"`
+	// InstanceID in the meta-data of the attached ISO.
+	InstanceID string `json:"instanceID,omitempty"`
+	// Device the ISO is attached at.
+	Device string `json:"device,omitempty"`
 }
 
 type NewVMSpecOSImage struct {
@@ -196,6 +312,37 @@ type VirtualMachineNetwork struct {
 	Model string `json:"model"`
 	// Bridge is the name of the bridge
 	Bridge string `json:"bridge"`
+	// VLAN is the 802.1Q tag of the port on the bridge. Zero leaves the port untagged.
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=4094
+	// +optional
+	VLAN int `json:"vlan,omitempty"`
+	// IPAddressClaimRef names an IPAddressClaim (ipam.cluster.x-k8s.io) in
+	// this namespace. Once the claim holds an IPAddress, its address, prefix
+	// and gateway are written into the matching ipconfigN of the machine for
+	// cloud-init to apply; until then the machine is not started.
+	// +optional
+	IPAddressClaimRef *corev1.LocalObjectReference `json:"ipAddressClaimRef,omitempty"`
+}
+
+// VirtualMachineNetworkStatus is what the operator knows about one network
+// port of the machine.
+type VirtualMachineNetworkStatus struct {
+	// Index is the N of netN and ipconfigN.
+	Index int `json:"index"`
+	// MACAddress is the port's MAC as Proxmox reports it.
+	// +optional
+	MACAddress string `json:"macAddress,omitempty"`
+	// Address is the address with prefix (10.0.0.5/24) written into ipconfigN
+	// from the IPAddressClaim.
+	// +optional
+	Address string `json:"address,omitempty"`
+	// Gateway is the gateway written into ipconfigN.
+	// +optional
+	Gateway string `json:"gateway,omitempty"`
+	// IPAddressClaim is the claim the address came from.
+	// +optional
+	IPAddressClaim string `json:"ipAddressClaim,omitempty"`
 }
 
 type QEMUStatus struct {
@@ -228,6 +375,13 @@ type VirtualMachineStatus struct {
 	// reconciled successfully.
 	// +optional
 	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
+	// Networks is one entry per network port: its MAC and, for a port with
+	// an IPAddressClaimRef, the address written into ipconfigN.
+	// +optional
+	Networks []VirtualMachineNetworkStatus `json:"networks,omitempty"`
+	// CloudInit is the NoCloud datasource attached from spec.vmSpec.cloudInit.
+	// +optional
+	CloudInit *VirtualMachineCloudInitStatus `json:"cloudInit,omitempty"`
 }
 
 // +kubebuilder:object:root=true

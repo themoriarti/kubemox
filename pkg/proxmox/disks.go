@@ -341,7 +341,7 @@ func (pc *ProxmoxClient) setProtection(ctx context.Context, vm *proxmox.VirtualM
 }
 
 func (pc *ProxmoxClient) deleteConfigKey(ctx context.Context, vm *proxmox.VirtualMachine, key string) error {
-	task, err := vm.Config(ctx, proxmox.VirtualMachineOption{Name: "delete", Value: key})
+	task, err := vm.Config(ctx, proxmox.VirtualMachineOption{Name: optionDelete, Value: key})
 	if err != nil {
 		return fmt.Errorf("removing %s from VM %d: %w", key, vm.VMID, err)
 	}

@@ -73,6 +73,10 @@ type VirtualMachineReconciler struct {
 	Scheme   *runtime.Scheme
 	Watcher  *watcher.ExternalWatcher
 	Recorder events.EventRecorder
+	// APIReader reads the optional IPAM objects straight from the API server,
+	// so that a cluster without those CRDs starts no informer for them. Nil
+	// falls back to the cached client.
+	APIReader client.Reader
 }
 
 // +kubebuilder:rbac:groups=proxmox.alperen.cloud,resources=virtualmachines,verbs=get;list;watch;create;update;patch;delete
@@ -342,6 +346,21 @@ func (r *VirtualMachineReconciler) handleVirtualMachineOperations(ctx context.Co
 			}
 			return *volRes, nil
 		}
+		// Addresses from IPAddressClaims go into ipconfigN before the machine
+		// is (re)started; a claim without an address keeps it stopped.
+		if netRes, netErr := r.reconcileNetworkIPs(ctx, pc, vm); netErr != nil || netRes != nil {
+			if netErr != nil {
+				logger.Error(netErr, "Error reconciling network addresses")
+				return ctrl.Result{}, client.IgnoreNotFound(netErr)
+			}
+			return *netRes, nil
+		}
+		// The NoCloud datasource comes after the addresses: its generated
+		// network-config is built from them.
+		if ciErr := r.reconcileNoCloud(ctx, pc, vm); ciErr != nil {
+			logger.Error(ciErr, "Error applying the cloud-init datasource")
+			return ctrl.Result{}, client.IgnoreNotFound(ciErr)
+		}
 		// Check if auto start is enabled
 		var res ctrl.Result
 		res, err = r.handleAutoStart(ctx, pc, vm)
@@ -418,6 +437,12 @@ func (r *VirtualMachineReconciler) handleCreateFromTemplate(ctx context.Context,
 		}
 		return *volRes, nil
 	}
+	if netRes, netErr := r.reconcileNetworkIPs(ctx, pc, vm); netErr != nil || netRes != nil {
+		if netErr != nil {
+			return dontRequeue, netErr
+		}
+		return *netRes, nil
+	}
 	return r.startCreatedVM(ctx, pc, vm, nodeName)
 }
 
@@ -454,6 +479,15 @@ func (r *VirtualMachineReconciler) handleCreateFromScratch(ctx context.Context, 
 		}
 		return *volRes, nil
 	}
+	if netRes, netErr := r.reconcileNetworkIPs(ctx, pc, vm); netErr != nil || netRes != nil {
+		if netErr != nil {
+			return dontRequeue, netErr
+		}
+		return *netRes, nil
+	}
+	if ciErr := r.reconcileNoCloud(ctx, pc, vm); ciErr != nil {
+		return dontRequeue, ciErr
+	}
 
 	return r.startCreatedVM(ctx, pc, vm, nodeName)
 }
@@ -461,6 +495,10 @@ func (r *VirtualMachineReconciler) handleCreateFromScratch(ctx context.Context, 
 func (r *VirtualMachineReconciler) startCreatedVM(ctx context.Context, pc *proxmox.ProxmoxClient, vm *proxmoxv1alpha1.VirtualMachine, nodeName string) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
 	vmName := vm.Spec.Name
+	if !wantsStart(vm) {
+		logger.Info("VirtualMachine created and left stopped", "name", vmName, "powerState", vm.Spec.PowerState)
+		return ctrl.Result{}, nil
+	}
 
 	startResult, err := pc.StartVM(vmName, nodeName)
 	if err != nil {
@@ -538,10 +576,43 @@ func (r *VirtualMachineReconciler) handleResourceNotFound(ctx context.Context, e
 	return err
 }
 
+// wantsStart says whether the machine should be started when it is found
+// stopped: PowerState decides when set, EnableAutoStart otherwise.
+func wantsStart(vm *proxmoxv1alpha1.VirtualMachine) bool {
+	switch vm.Spec.PowerState {
+	case proxmoxv1alpha1.PowerStateRunning:
+		return true
+	case proxmoxv1alpha1.PowerStateStopped, proxmoxv1alpha1.PowerStateManual:
+		return false
+	default:
+		return vm.Spec.EnableAutoStart
+	}
+}
+
 func (r *VirtualMachineReconciler) handleAutoStart(ctx context.Context,
 	pc *proxmox.ProxmoxClient, vm *proxmoxv1alpha1.VirtualMachine) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
-	if vm.Spec.EnableAutoStart {
+	if vm.Spec.PowerState == proxmoxv1alpha1.PowerStateStopped {
+		vmState, err := pc.GetVMState(vm.Spec.Name, vm.Spec.NodeName)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+		if vmState == proxmox.VirtualMachineRunningState {
+			logger.Info("PowerState is Stopped, stopping VirtualMachine", "name", vm.Spec.Name)
+			if err = pc.StopVM(vm.Spec.Name, vm.Spec.NodeName); err != nil {
+				var taskErr *proxmox.TaskError
+				if errors.As(err, &taskErr) {
+					r.Recorder.Eventf(vm, nil, "Warning", "Error", "Error", fmt.Sprintf("VirtualMachine %s failed to stop due to %s", vm.Spec.Name, err))
+					return dontRequeue, reconcile.TerminalError(err)
+				}
+				return dontRequeue, err
+			}
+			r.Recorder.Eventf(vm, nil, "Normal", "Stopped", "Stopped", fmt.Sprintf("VirtualMachine %s stopped: powerState is Stopped", vm.Spec.Name))
+			return ctrl.Result{RequeueAfter: time.Second}, nil
+		}
+		return ctrl.Result{}, nil
+	}
+	if wantsStart(vm) {
 		vmName := vm.Spec.Name
 		nodeName := vm.Spec.NodeName
 		vmState, err := pc.GetVMState(vmName, nodeName)

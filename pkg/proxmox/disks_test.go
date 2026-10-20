@@ -68,6 +68,7 @@ const (
 	slotScsi1      = "scsi1"
 	volData        = "data"
 	holderName     = "holder"
+	testNamespace  = "tenant-a"
 )
 
 func newFakePVE() *fakePVE {
@@ -398,7 +399,7 @@ func newTestClient(t *testing.T, f *fakePVE) *ProxmoxClient {
 }
 
 func TestHolderName(t *testing.T) {
-	if got := HolderName("tenant-a", fakeNode); got != "kubemox-disks-tenant-a-pve1" {
+	if got := HolderName(testNamespace, fakeNode); got != "kubemox-disks-tenant-a-pve1" {
 		t.Fatalf("HolderName() = %q", got)
 	}
 	long := HolderName(strings.Repeat("n", 50), strings.Repeat("x", 30))
@@ -437,7 +438,7 @@ func TestEnsureDiskHolderCreatesOnceAndFinds(t *testing.T) {
 	pc := newTestClient(t, f)
 	ctx := context.Background()
 
-	h, err := pc.EnsureDiskHolder(ctx, "tenant-a", fakeNode)
+	h, err := pc.EnsureDiskHolder(ctx, testNamespace, fakeNode)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -449,7 +450,7 @@ func TestEnsureDiskHolderCreatesOnceAndFinds(t *testing.T) {
 		t.Fatalf("holder config = %v", cfg)
 	}
 
-	again, err := pc.EnsureDiskHolder(ctx, "tenant-a", fakeNode)
+	again, err := pc.EnsureDiskHolder(ctx, testNamespace, fakeNode)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -472,11 +473,11 @@ func TestEnsureDiskHolderCreatesOnceAndFinds(t *testing.T) {
 
 func TestCreateHolderDiskBlankAndImport(t *testing.T) {
 	f := newFakePVE()
-	f.addVM(9998, fakeNode, HolderName("tenant-a", fakeNode), map[string]string{keyProtection: "1"})
+	f.addVM(9998, fakeNode, HolderName(testNamespace, fakeNode), map[string]string{keyProtection: "1"})
 	f.addVolume(templateVolume, 8)
 	pc := newTestClient(t, f)
 	ctx := context.Background()
-	h := &DiskHolder{Name: HolderName("tenant-a", fakeNode), VMID: 9998, Node: fakeNode}
+	h := &DiskHolder{Name: HolderName(testNamespace, fakeNode), VMID: 9998, Node: fakeNode}
 
 	slot, volid, size, err := pc.CreateHolderDisk(ctx, h, fakeStorage, 5, "")
 	if err != nil {
@@ -636,12 +637,12 @@ func TestWaitDiskTaskNilIsSynchronous(t *testing.T) {
 
 func TestAttachAndDetachVolume(t *testing.T) {
 	f := newFakePVE()
-	f.addVM(9998, fakeNode, HolderName("tenant-a", fakeNode), map[string]string{keyProtection: "1"})
+	f.addVM(9998, fakeNode, HolderName(testNamespace, fakeNode), map[string]string{keyProtection: "1"})
 	f.addVM(9999, fakeNode, "web", map[string]string{slotScsi0: "main-pool:vm-9999-disk-0,size=8G"})
 	f.addVolume("main-pool:vm-9999-disk-0", 8)
 	pc := newTestClient(t, f)
 	ctx := context.Background()
-	h := &DiskHolder{Name: HolderName("tenant-a", fakeNode), VMID: 9998, Node: fakeNode}
+	h := &DiskHolder{Name: HolderName(testNamespace, fakeNode), VMID: 9998, Node: fakeNode}
 
 	slot, volid, _, err := pc.CreateHolderDisk(ctx, h, fakeStorage, 4, "")
 	if err != nil {
@@ -650,7 +651,7 @@ func TestAttachAndDetachVolume(t *testing.T) {
 	vm := &proxmoxv1alpha1.VirtualMachine{Spec: proxmoxv1alpha1.VirtualMachineSpec{Name: "web", NodeName: fakeNode}}
 	vol := &proxmoxv1alpha1.VirtualMachineVolume{}
 	vol.Name = volData
-	vol.Namespace = "tenant-a"
+	vol.Namespace = testNamespace
 	vol.Spec.NodeName = fakeNode
 	vol.Status.Holder = &proxmoxv1alpha1.VirtualMachineVolumeHolder{Name: h.Name, VMID: h.VMID}
 	vol.Status.Slot = slot
@@ -735,14 +736,14 @@ func TestReservedDevicesAndDetachFromUnused(t *testing.T) {
 	// A volume unplugged behind the controller's back sits as unusedN on the
 	// VM; detaching finds it there and still gives it back to the holder.
 	f := newFakePVE()
-	f.addVM(9998, fakeNode, HolderName("tenant-a", fakeNode), map[string]string{keyProtection: "1"})
+	f.addVM(9998, fakeNode, HolderName(testNamespace, fakeNode), map[string]string{keyProtection: "1"})
 	f.addVM(9999, fakeNode, "web", map[string]string{"unused0": "main-pool:vm-9999-disk-3"})
 	f.addVolume("main-pool:vm-9999-disk-3", 4)
 	pc := newTestClient(t, f)
 	vm := &proxmoxv1alpha1.VirtualMachine{Spec: proxmoxv1alpha1.VirtualMachineSpec{Name: "web", NodeName: fakeNode}}
 	vol := &proxmoxv1alpha1.VirtualMachineVolume{}
 	vol.Name = volData
-	vol.Namespace = "tenant-a"
+	vol.Namespace = testNamespace
 	vol.Spec.NodeName = fakeNode
 	vol.Status.Volume = "main-pool:vm-9999-disk-3"
 	vol.Status.Slot = slotScsi1
