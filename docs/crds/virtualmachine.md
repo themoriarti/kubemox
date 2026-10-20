@@ -257,4 +257,4 @@ spec:
 
 A missing `meta-data` is generated with the machine's name as hostname and an instance id derived from the content, so a change to the Secret gives cloud-init a new instance and it runs again on the guest's next boot; the operator does not reboot the guest. A missing `network-config` is generated from the ports that got an address through an `ipAddressClaimRef`, matched by MAC, with `nameservers` as the resolvers. `status.cloudInit` records the hash, instance id and device of the attached ISO; the ISO is removed with the machine.
 
-Rebuilding the ISO needs `Datastore.Allocate` on the ISO storage for the token (the first upload only needs `Datastore.AllocateTemplate`).
+Rebuilding the ISO, and removing it when the machine is deleted, needs `Datastore.Allocate` on the ISO storage for the token (the first upload only needs `Datastore.AllocateTemplate`). Without it the machine is still destroyed and the ISO is left on the storage, which the operator log says.
