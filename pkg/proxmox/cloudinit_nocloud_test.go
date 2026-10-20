@@ -48,3 +48,21 @@ func TestNoCloudHashAndMetaData(t *testing.T) {
 		t.Fatalf("RenderMetaData = %q", got)
 	}
 }
+
+func TestFirstBootDisk(t *testing.T) {
+	drives := map[string]string{
+		"ide2":    "local:iso/x.iso,media=cdrom,size=951M",
+		"scsi1":   "main-pool:vm-1-disk-1,size=1G",
+		"scsi0":   "main-pool:vm-1-disk-0,size=8G",
+		"virtio0": "main-pool:vm-1-disk-2,size=1G",
+	}
+	if got := firstBootDisk(drives); got != "scsi0" {
+		t.Fatalf("firstBootDisk = %q", got)
+	}
+	if got := firstBootDisk(map[string]string{"ide2": "local:iso/x.iso,media=cdrom"}); got != "" {
+		t.Fatalf("a CD-ROM was chosen: %q", got)
+	}
+	if got := firstBootDisk(map[string]string{"sata1": "a:b,size=1G", "virtio3": "a:c,size=1G"}); got != "virtio3" {
+		t.Fatalf("firstBootDisk = %q, want virtio3", got)
+	}
+}
