@@ -57,6 +57,8 @@ const (
 	virtualMachineUpdateSteps     = 3
 	virtualMachineDeleteTimesNum  = 10
 	virtualMachineDeleteSteps     = 3
+	// vmStateUnknown is reported when the state could not be read.
+	vmStateUnknown = "unknown"
 	// The network name
 	netStr = "net"
 	// Placeholder when QEMU agent data is unavailable or the VM does not exist yet
@@ -407,7 +409,13 @@ func (pc *ProxmoxClient) GetVMState(vmName, nodeName string) (state string, err 
 	// Gets the VMstate from Proxmox API
 	VirtualMachine, err := pc.getVirtualMachine(vmName, nodeName)
 	if err != nil {
-		return "unknown", err
+		return vmStateUnknown, err
+	}
+	// The cached object keeps the status it was fetched with; a power
+	// decision needs the status Proxmox has now, or a machine stopped a
+	// moment ago still reads as running and is never started again.
+	if err = VirtualMachine.Ping(ctx); err != nil {
+		return vmStateUnknown, err
 	}
 	switch VirtualMachine.Status {
 	case VirtualMachineRunningState:
@@ -415,7 +423,7 @@ func (pc *ProxmoxClient) GetVMState(vmName, nodeName string) (state string, err 
 	case VirtualMachineStoppedState:
 		return VirtualMachineStoppedState, nil
 	default:
-		return "unknown", err
+		return vmStateUnknown, err
 	}
 }
 
