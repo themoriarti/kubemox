@@ -73,6 +73,10 @@ type VirtualMachineReconciler struct {
 	Scheme   *runtime.Scheme
 	Watcher  *watcher.ExternalWatcher
 	Recorder events.EventRecorder
+	// APIReader reads the optional IPAM objects straight from the API server,
+	// so that a cluster without those CRDs starts no informer for them. Nil
+	// falls back to the cached client.
+	APIReader client.Reader
 }
 
 // +kubebuilder:rbac:groups=proxmox.alperen.cloud,resources=virtualmachines,verbs=get;list;watch;create;update;patch;delete
@@ -342,6 +346,21 @@ func (r *VirtualMachineReconciler) handleVirtualMachineOperations(ctx context.Co
 			}
 			return *volRes, nil
 		}
+		// Addresses from IPAddressClaims go into ipconfigN before the machine
+		// is (re)started; a claim without an address keeps it stopped.
+		if netRes, netErr := r.reconcileNetworkIPs(ctx, pc, vm); netErr != nil || netRes != nil {
+			if netErr != nil {
+				logger.Error(netErr, "Error reconciling network addresses")
+				return ctrl.Result{}, client.IgnoreNotFound(netErr)
+			}
+			return *netRes, nil
+		}
+		// The NoCloud datasource comes after the addresses: its generated
+		// network-config is built from them.
+		if ciErr := r.reconcileNoCloud(ctx, pc, vm); ciErr != nil {
+			logger.Error(ciErr, "Error applying the cloud-init datasource")
+			return ctrl.Result{}, client.IgnoreNotFound(ciErr)
+		}
 		// Check if auto start is enabled
 		var res ctrl.Result
 		res, err = r.handleAutoStart(ctx, pc, vm)
@@ -418,6 +437,12 @@ func (r *VirtualMachineReconciler) handleCreateFromTemplate(ctx context.Context,
 		}
 		return *volRes, nil
 	}
+	if netRes, netErr := r.reconcileNetworkIPs(ctx, pc, vm); netErr != nil || netRes != nil {
+		if netErr != nil {
+			return dontRequeue, netErr
+		}
+		return *netRes, nil
+	}
 	return r.startCreatedVM(ctx, pc, vm, nodeName)
 }
 
@@ -453,6 +478,15 @@ func (r *VirtualMachineReconciler) handleCreateFromScratch(ctx context.Context, 
 			return dontRequeue, volErr
 		}
 		return *volRes, nil
+	}
+	if netRes, netErr := r.reconcileNetworkIPs(ctx, pc, vm); netErr != nil || netRes != nil {
+		if netErr != nil {
+			return dontRequeue, netErr
+		}
+		return *netRes, nil
+	}
+	if ciErr := r.reconcileNoCloud(ctx, pc, vm); ciErr != nil {
+		return dontRequeue, ciErr
 	}
 
 	return r.startCreatedVM(ctx, pc, vm, nodeName)

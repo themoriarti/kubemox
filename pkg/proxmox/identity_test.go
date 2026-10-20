@@ -25,7 +25,7 @@ func optionMap(opts []proxmox.VirtualMachineOption) map[string]string {
 
 func TestCreationOptions(t *testing.T) {
 	vm := &proxmoxv1alpha1.VirtualMachine{}
-	vm.Spec.Pool = "tenant-a"
+	vm.Spec.Pool = testNamespace
 	vm.Spec.Tags = []string{testTag, virtualMachineTag, testTag, ""}
 	vm.Spec.VMSpec = &proxmoxv1alpha1.NewVMSpec{
 		SMBIOSUUID: "0D9C1E2A-1111-4222-8333-444455556666",
@@ -40,7 +40,7 @@ func TestCreationOptions(t *testing.T) {
 	}
 	got := optionMap(creationOptions(vm))
 	want := map[string]string{
-		"pool":      "tenant-a",
+		"pool":      testNamespace,
 		"agent":     "1",
 		"tags":      "kubemox;web",
 		"smbios1":   "uuid=0d9c1e2a-1111-4222-8333-444455556666",
@@ -80,7 +80,7 @@ func TestIdentityDriftAndMissingTags(t *testing.T) {
 	}
 	cfg := &proxmox.VirtualMachineConfig{
 		SMBios1: "uuid=0D9C1E2A-1111-4222-8333-444455556666,manufacturer=QUJD",
-		Bios:    "",
+		Bios:    nil,
 		Machine: testMachine,
 		Tags:    "kubemox;other",
 	}

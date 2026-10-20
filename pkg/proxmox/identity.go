@@ -28,6 +28,8 @@ const (
 	optionAgent   = "agent"
 	optionEFIDisk = "efidisk0"
 	optionTPM     = "tpmstate0"
+	// optionDelete is the config key that removes other keys.
+	optionDelete = "delete"
 
 	identityConfigTimeout = 5 * time.Minute
 	identityPollInterval  = 2 * time.Second
@@ -133,16 +135,16 @@ func identityDrift(vm *proxmoxv1alpha1.VirtualMachine,
 		case optionSMBIOS:
 			have = "uuid=" + smbiosUUID(cfg.SMBios1)
 		case optionBios:
-			have = cfg.Bios
-			if have == "" {
-				have = "seabios"
+			have = "seabios"
+			if cfg.Bios != nil && *cfg.Bios != "" {
+				have = *cfg.Bios
 			}
 		case optionMachine:
 			have = cfg.Machine
 		case optionSCSIHW:
-			have = cfg.SCSIHW
-			if have == "" {
-				have = "lsi"
+			have = "lsi"
+			if cfg.SCSIHW != nil && *cfg.SCSIHW != "" {
+				have = *cfg.SCSIHW
 			}
 		case optionAgent:
 			// Proxmox reports "1" or "enabled=1,..." for an enabled agent.

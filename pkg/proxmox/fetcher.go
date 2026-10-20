@@ -114,7 +114,7 @@ func (f *VirtualMachineFetcher) GetDesiredState(ctx context.Context, key types.N
 		Cores:    GetCores(vm),
 		Sockets:  getSockets(vm),
 		Memory:   GetMemory(vm),
-		Networks: getNetworks(vm),
+		Networks: networkShapes(getNetworks(vm)),
 		Disks:    sortDisks(disks),
 	}, nil
 }
