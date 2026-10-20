@@ -19,6 +19,9 @@ const (
 	sourceTestNode   = "pve1"
 	sourceTestVolid  = "local-zfs:vm-9998-disk-0"
 	sourceTestImages = "cozy-public"
+	sourceTestGolden = "golden"
+	sourceTestTenant = "team-a"
+	sourceTestBase   = "base"
 )
 
 func volumeFixture(namespace, name, node string, cloneable bool) *proxmoxv1alpha1.VirtualMachineVolume {
@@ -60,22 +63,22 @@ func TestResolveSourceAcrossNamespaces(t *testing.T) {
 	}{
 		{
 			name:      "same namespace needs no flag",
-			source:    volumeFixture("team-a", "base", sourceTestNode, false),
-			ref:       proxmoxv1alpha1.VirtualMachineVolumeDiskSource{Name: "base"},
+			source:    volumeFixture(sourceTestTenant, sourceTestBase, sourceTestNode, false),
+			ref:       proxmoxv1alpha1.VirtualMachineVolumeDiskSource{Name: sourceTestBase},
 			wantVolid: sourceTestVolid,
 		},
 		{
 			name:       "another namespace waits until the source is cloneable",
-			source:     volumeFixture(sourceTestImages, "golden", sourceTestNode, false),
-			ref:        proxmoxv1alpha1.VirtualMachineVolumeDiskSource{Name: "golden", Namespace: sourceTestImages},
+			source:     volumeFixture(sourceTestImages, sourceTestGolden, sourceTestNode, false),
+			ref:        proxmoxv1alpha1.VirtualMachineVolumeDiskSource{Name: sourceTestGolden, Namespace: sourceTestImages},
 			wantReason: reasonVolumeSourceKept,
 			wantPhase:  proxmoxv1alpha1.VirtualMachineVolumePhasePending,
 			wantRetry:  true,
 		},
 		{
 			name:      "another namespace copies a cloneable source",
-			source:    volumeFixture(sourceTestImages, "golden", sourceTestNode, true),
-			ref:       proxmoxv1alpha1.VirtualMachineVolumeDiskSource{Name: "golden", Namespace: sourceTestImages},
+			source:    volumeFixture(sourceTestImages, sourceTestGolden, sourceTestNode, true),
+			ref:       proxmoxv1alpha1.VirtualMachineVolumeDiskSource{Name: sourceTestGolden, Namespace: sourceTestImages},
 			wantVolid: sourceTestVolid,
 		},
 		{
@@ -88,15 +91,15 @@ func TestResolveSourceAcrossNamespaces(t *testing.T) {
 		},
 		{
 			name:       "a source on another node is final",
-			source:     volumeFixture(sourceTestImages, "golden", "pve2", true),
-			ref:        proxmoxv1alpha1.VirtualMachineVolumeDiskSource{Name: "golden", Namespace: sourceTestImages},
+			source:     volumeFixture(sourceTestImages, sourceTestGolden, "pve2", true),
+			ref:        proxmoxv1alpha1.VirtualMachineVolumeDiskSource{Name: sourceTestGolden, Namespace: sourceTestImages},
 			wantReason: reasonVolumeFailed,
 			wantPhase:  proxmoxv1alpha1.VirtualMachineVolumePhaseFailed,
 		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			vol := volumeFixture("team-a", "copy", sourceTestNode, false)
+			vol := volumeFixture(sourceTestTenant, "copy", sourceTestNode, false)
 			vol.Status = proxmoxv1alpha1.VirtualMachineVolumeStatus{}
 			ref := tc.ref
 			vol.Spec.Source = &proxmoxv1alpha1.VirtualMachineVolumeSource{Disk: &ref}

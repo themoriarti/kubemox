@@ -80,21 +80,6 @@ spec:
 
 The copy is a full `import-from` of the source's current volume, so the source may be grown, re-attached or deleted afterwards without touching the copies. Both volumes have to be on the same node: a Proxmox volume is reachable from the node that owns it, and `import-from` runs there.
 
-## Attaching to a VirtualMachine
-
-A `VirtualMachine` attaches the volume with a `volumeRef` drive instead of a `storage` and `size`:
-
-```yaml
-spec:
-  vmSpec:
-    disk:
-      - device: scsi1
-        volumeRef:
-          name: web-system
-```
-
-The volume moves from its holder onto the VM before the VM starts, and back when the ref is removed or the VM is deleted. See [VirtualMachine](virtualmachine.md#attaching-a-virtualmachinevolume).
-
 ## Status
 
 ```shell
