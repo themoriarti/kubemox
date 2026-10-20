@@ -16,8 +16,9 @@ import (
 )
 
 const (
-	sourceTestNode  = "pve1"
-	sourceTestVolid = "local-zfs:vm-9998-disk-0"
+	sourceTestNode   = "pve1"
+	sourceTestVolid  = "local-zfs:vm-9998-disk-0"
+	sourceTestImages = "cozy-public"
 )
 
 func volumeFixture(namespace, name, node string, cloneable bool) *proxmoxv1alpha1.VirtualMachineVolume {
@@ -65,30 +66,30 @@ func TestResolveSourceAcrossNamespaces(t *testing.T) {
 		},
 		{
 			name:       "another namespace waits until the source is cloneable",
-			source:     volumeFixture("cozy-public", "golden", sourceTestNode, false),
-			ref:        proxmoxv1alpha1.VirtualMachineVolumeDiskSource{Name: "golden", Namespace: "cozy-public"},
+			source:     volumeFixture(sourceTestImages, "golden", sourceTestNode, false),
+			ref:        proxmoxv1alpha1.VirtualMachineVolumeDiskSource{Name: "golden", Namespace: sourceTestImages},
 			wantReason: reasonVolumeSourceKept,
 			wantPhase:  proxmoxv1alpha1.VirtualMachineVolumePhasePending,
 			wantRetry:  true,
 		},
 		{
 			name:      "another namespace copies a cloneable source",
-			source:    volumeFixture("cozy-public", "golden", sourceTestNode, true),
-			ref:       proxmoxv1alpha1.VirtualMachineVolumeDiskSource{Name: "golden", Namespace: "cozy-public"},
+			source:    volumeFixture(sourceTestImages, "golden", sourceTestNode, true),
+			ref:       proxmoxv1alpha1.VirtualMachineVolumeDiskSource{Name: "golden", Namespace: sourceTestImages},
 			wantVolid: sourceTestVolid,
 		},
 		{
 			name:       "a missing source is waited for",
 			source:     nil,
-			ref:        proxmoxv1alpha1.VirtualMachineVolumeDiskSource{Name: "nowhere", Namespace: "cozy-public"},
+			ref:        proxmoxv1alpha1.VirtualMachineVolumeDiskSource{Name: "nowhere", Namespace: sourceTestImages},
 			wantReason: reasonVolumeSourceWaiting,
 			wantPhase:  proxmoxv1alpha1.VirtualMachineVolumePhasePending,
 			wantRetry:  true,
 		},
 		{
 			name:       "a source on another node is final",
-			source:     volumeFixture("cozy-public", "golden", "pve2", true),
-			ref:        proxmoxv1alpha1.VirtualMachineVolumeDiskSource{Name: "golden", Namespace: "cozy-public"},
+			source:     volumeFixture(sourceTestImages, "golden", "pve2", true),
+			ref:        proxmoxv1alpha1.VirtualMachineVolumeDiskSource{Name: "golden", Namespace: sourceTestImages},
 			wantReason: reasonVolumeFailed,
 			wantPhase:  proxmoxv1alpha1.VirtualMachineVolumePhaseFailed,
 		},
