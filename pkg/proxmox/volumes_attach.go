@@ -3,6 +3,7 @@ package proxmox
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"strings"
 
 	"github.com/luthermonson/go-proxmox"
@@ -126,20 +127,46 @@ func (pc *ProxmoxClient) ensureBootable(ctx context.Context, node string, vmid i
 	return nil
 }
 
-// bootOrderWith returns the boot order with device first, unchanged when the
-// device is already listed. An empty or legacy (non "order=") value is
-// replaced by one that only names the device.
+// bootOrderWith returns the boot order with device in it, unchanged when the
+// device is already listed. Volumes are attached in the order of
+// vmSpec.disk, and that order is the boot priority: a device goes right after
+// the last hard-disk entry (scsi, virtio, sata) already in the order, so a
+// second disk never displaces the first one; with no hard disk listed yet it
+// goes to the head. An empty or legacy (non "order=") value is replaced by
+// one that only names the device.
 func bootOrderWith(boot, device string) string {
 	if !strings.HasPrefix(boot, "order=") {
 		return "order=" + device
 	}
 	listed := strings.Split(strings.TrimPrefix(boot, "order="), ";")
-	for _, d := range listed {
+	lastDisk := -1
+	for i, d := range listed {
 		if d == device {
 			return boot
 		}
+		if isHardDiskSlot(d) {
+			lastDisk = i
+		}
 	}
-	return "order=" + strings.Join(append([]string{device}, listed...), ";")
+	order := make([]string, 0, len(listed)+1)
+	order = append(order, listed[:lastDisk+1]...)
+	order = append(order, device)
+	order = append(order, listed[lastDisk+1:]...)
+	return "order=" + strings.Join(order, ";")
+}
+
+// isHardDiskSlot reports whether a boot-order entry names a drive on a bus
+// that only carries disks. ide is left out: on Proxmox it usually holds the
+// cloud-init or installer CD-ROM.
+func isHardDiskSlot(slot string) bool {
+	for _, bus := range []string{"scsi", "virtio", "sata"} {
+		if rest, ok := strings.CutPrefix(slot, bus); ok && rest != "" {
+			if _, err := strconv.Atoi(rest); err == nil {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // DetachVolume reassigns a volume from the VM's device back to its holder,
