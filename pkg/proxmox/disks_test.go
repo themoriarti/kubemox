@@ -770,11 +770,11 @@ func TestBootOrderWith(t *testing.T) {
 		{"order=scsi0;ide2", slotScsi0, "order=scsi0;ide2"},
 		{"order=ide2;scsi0", slotScsi0, "order=ide2;scsi0"},
 		// a second volume goes after the first disk, not ahead of it (pg-1 on pskep booted into PXE)
-		{"order=scsi0;net0;ide2", "scsi1", "order=scsi0;scsi1;net0;ide2"},
+		{"order=scsi0;net0;ide2", slotScsi1, "order=scsi0;scsi1;net0;ide2"},
 		{"order=scsi0;scsi1;net0", "scsi2", "order=scsi0;scsi1;scsi2;net0"},
-		{"order=virtio0;ide2", "scsi1", "order=virtio0;scsi1;ide2"},
-		{"order=net0;ide2", "scsi1", "order=scsi1;net0;ide2"},
-		{"order=ide0;net0", "scsi1", "order=scsi1;ide0;net0"},
+		{"order=virtio0;ide2", slotScsi1, "order=virtio0;scsi1;ide2"},
+		{"order=net0;ide2", slotScsi1, "order=scsi1;net0;ide2"},
+		{"order=ide0;net0", slotScsi1, "order=scsi1;ide0;net0"},
 	}
 	for _, tc := range cases {
 		if got := bootOrderWith(tc.boot, tc.device); got != tc.want {
