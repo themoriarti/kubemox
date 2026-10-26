@@ -3,6 +3,7 @@ package proxmox
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"regexp"
@@ -12,18 +13,29 @@ import (
 	"testing"
 
 	"github.com/luthermonson/go-proxmox"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
+
+	proxmoxv1alpha1 "github.com/alperencelik/kubemox/api/proxmox/v1alpha1"
 )
 
 // lxcTestNode is the one node the fake LXC host answers for.
 const lxcTestNode = "pve-ct"
 
+const testCTName = "web"
+
 // fakeCT is one container on the fake LXC host.
 type fakeCT struct {
 	name   string
 	status string
+	cores  int
+	memory int // MiB
+	tags   string
 	// lockErr, when set, makes destroy fail with this message, the way a
 	// locked or protected container refuses it.
 	lockErr string
+	// config holds every other key written by create, clone or a config PUT.
+	config map[string]string
 }
 
 // fakeLXCHost is the slice of the Proxmox API the Container code touches.
@@ -31,6 +43,7 @@ type fakeCT struct {
 // status line, which is where go-proxmox reads it from.
 type fakeLXCHost struct {
 	mu    sync.Mutex
+	url   string // API base URL, for a ProxmoxConnection endpoint
 	cts   map[int]*fakeCT
 	calls []string // "METHOD path" in order
 }
@@ -43,10 +56,22 @@ func newFakeLXCHost(t *testing.T, cts map[int]*fakeCT) (*fakeLXCHost, *ProxmoxCl
 	f := &fakeLXCHost{cts: cts}
 	srv := httptest.NewServer(f)
 	t.Cleanup(srv.Close)
-	client := proxmox.NewClient(srv.URL+"/api2/json",
+	f.url = srv.URL + "/api2/json"
+	client := proxmox.NewClient(f.url,
 		proxmox.WithAPIToken("test@pve!t", "secret"),
 		proxmox.WithHTTPClient(srv.Client()))
 	return f, &ProxmoxClient{Client: client, nodesCache: make(map[string]NodeCache)}
+}
+
+// testContainer is a Container object for spec.name testCTName on the fake
+// node, with the given UID and recorded VMID (0: none yet).
+func testContainer(uid string, vmid int) *proxmoxv1alpha1.Container {
+	ct := &proxmoxv1alpha1.Container{
+		ObjectMeta: metav1.ObjectMeta{Name: "ct-" + uid, UID: types.UID(uid)},
+		Spec:       proxmoxv1alpha1.ContainerSpec{Name: testCTName, NodeName: lxcTestNode},
+	}
+	ct.Status.Status.ID = vmid
+	return ct
 }
 
 func (f *fakeLXCHost) called(call string) bool {
@@ -60,20 +85,47 @@ func (f *fakeLXCHost) called(call string) bool {
 	return false
 }
 
+func (f *fakeLXCHost) nextID() int {
+	id := 100
+	for f.cts[id] != nil {
+		id++
+	}
+	return id
+}
+
 func (f *fakeLXCHost) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.calls = append(f.calls, r.Method+" "+r.URL.Path)
+	switch r.URL.Path {
+	case "/api2/json/cluster/status":
+		writeCTData(w, []any{})
+		return
+	case "/api2/json/cluster/nextid":
+		writeCTData(w, strconv.Itoa(f.nextID()))
+		return
+	}
 	path := strings.TrimPrefix(r.URL.Path, "/api2/json/nodes/"+lxcTestNode)
 	switch {
 	case path == "/status":
 		writeCTData(w, map[string]any{"uptime": 1})
-	case path == "/lxc":
+	case path == "/lxc" && r.Method == http.MethodGet:
 		list := make([]map[string]any, 0, len(f.cts))
 		for id, ct := range f.cts {
 			list = append(list, ct.summary(id))
 		}
 		writeCTData(w, list)
+	case path == "/lxc" && r.Method == http.MethodPost:
+		p := ctParams(r)
+		id, _ := strconv.Atoi(p["vmid"])
+		if f.cts[id] != nil {
+			writePVEError(w, fmt.Sprintf("CT %d already exists", id))
+			return
+		}
+		ct := &fakeCT{status: VirtualMachineStoppedState, config: map[string]string{}}
+		ct.set(p)
+		f.cts[id] = ct
+		writeCTData(w, fakeCTUPID("vzcreate", id))
 	case strings.HasPrefix(path, "/tasks/"):
 		writeCTData(w, map[string]any{"status": "stopped", "exitstatus": "OK"})
 	case fakeCTPath.MatchString(path):
@@ -95,7 +147,33 @@ func (f *fakeLXCHost) serveCT(w http.ResponseWriter, r *http.Request, id int, su
 	case "GET /status/current":
 		writeCTData(w, ct.summary(id))
 	case "GET /config":
-		writeCTData(w, map[string]any{"hostname": ct.name})
+		cfg := map[string]any{
+			"hostname": ct.name, virtualMachineCPUOption: ct.cores, virtualMachineMemoryOption: ct.memory,
+			containerOptionTags: ct.tags,
+		}
+		for k, v := range ct.config {
+			cfg[k] = v
+		}
+		writeCTData(w, cfg)
+	case "PUT /config":
+		ct.set(ctParams(r))
+		writeCTData(w, nil)
+	case "PUT /resize":
+		p := ctParams(r)
+		volume, _, _ := strings.Cut(ct.config[p["disk"]], ",")
+		ct.config[p["disk"]] = volume + ",size=" + p["size"]
+		writeCTData(w, fakeCTUPID("resize", id))
+	case "POST /clone":
+		p := ctParams(r)
+		newID, _ := strconv.Atoi(p["newid"])
+		clone := &fakeCT{status: VirtualMachineStoppedState, cores: ct.cores, memory: ct.memory,
+			tags: ct.tags, config: map[string]string{}}
+		for k, v := range ct.config {
+			clone.config[k] = v
+		}
+		clone.name = p["hostname"]
+		f.cts[newID] = clone
+		writeCTData(w, fakeCTUPID("vzclone", id))
 	case "POST /status/stop":
 		ct.status = VirtualMachineStoppedState
 		writeCTData(w, fakeCTUPID("vzstop", id))
@@ -117,9 +195,46 @@ func (f *fakeLXCHost) serveCT(w http.ResponseWriter, r *http.Request, id int, su
 	}
 }
 
+// set applies create, clone or config parameters to the container.
+func (ct *fakeCT) set(p map[string]string) {
+	if ct.config == nil {
+		ct.config = map[string]string{}
+	}
+	for k, v := range p {
+		switch k {
+		case "vmid":
+		case "hostname":
+			ct.name = v
+		case containerOptionTags:
+			ct.tags = v
+		case virtualMachineCPUOption:
+			ct.cores, _ = strconv.Atoi(v)
+		case virtualMachineMemoryOption:
+			ct.memory, _ = strconv.Atoi(v)
+		default:
+			ct.config[k] = v
+		}
+	}
+}
+
 // summary is the container as /lxc and /lxc/{vmid}/status/current list it.
 func (ct *fakeCT) summary(id int) map[string]any {
-	return map[string]any{"vmid": id, "name": ct.name, "status": ct.status}
+	return map[string]any{
+		"vmid": id, "name": ct.name, "status": ct.status, containerOptionTags: ct.tags,
+		"cpus": ct.cores, "maxmem": ct.memory * 1024 * 1024,
+	}
+}
+
+// ctParams reads a JSON request body, which is what go-proxmox sends.
+func ctParams(r *http.Request) map[string]string {
+	out := map[string]string{}
+	body, _ := io.ReadAll(r.Body)
+	var raw map[string]any
+	_ = json.Unmarshal(body, &raw)
+	for k, v := range raw {
+		out[k] = fmt.Sprintf("%v", v)
+	}
+	return out
 }
 
 func fakeCTUPID(kind string, id int) string {
