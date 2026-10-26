@@ -72,7 +72,7 @@ func TestWithoutBootDevice(t *testing.T) {
 		"order=scsi0;net0;ide2": "order=scsi0;net0",
 		"order=scsi0;ide2;net0": "order=scsi0;net0",
 		"order=scsi0;ide20":     "order=scsi0;ide20",
-		"order=scsi0":           "order=scsi0",
+		"order=virtio0":         "order=virtio0",
 	} {
 		if got := withoutBootDevice(in, "ide2"); got != want {
 			t.Errorf("withoutBootDevice(%q) = %q, want %q", in, got, want)
