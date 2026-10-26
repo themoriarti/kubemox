@@ -66,3 +66,16 @@ func TestFirstBootDisk(t *testing.T) {
 		t.Fatalf("firstBootDisk = %q, want virtio3", got)
 	}
 }
+
+func TestWithoutBootDevice(t *testing.T) {
+	for in, want := range map[string]string{
+		"order=scsi0;net0;ide2": "order=scsi0;net0",
+		"order=scsi0;ide2;net0": "order=scsi0;net0",
+		"order=scsi0;ide20":     "order=scsi0;ide20",
+		"order=scsi0":           "order=scsi0",
+	} {
+		if got := withoutBootDevice(in, "ide2"); got != want {
+			t.Errorf("withoutBootDevice(%q) = %q, want %q", in, got, want)
+		}
+	}
+}

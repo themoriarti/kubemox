@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -98,17 +99,13 @@ func RenderNetworkConfig(ports []PortAddress, nameservers []string) string {
 }
 
 // ApplyNoCloud builds the datasource ISO, uploads it and attaches it at the
-// device. An ISO already attached by an earlier apply is unmounted and
-// removed first, since the storage keeps one file per machine.
+// device. A rebuild uploads over the ISO of an earlier apply: the Proxmox
+// upload replaces an existing file, so the old one is neither detached nor
+// deleted first (deleting needs Datastore.Allocate on the ISO storage).
 func (pc *ProxmoxClient) ApplyNoCloud(vm *proxmoxv1alpha1.VirtualMachine, device string, data NoCloudData) error {
 	virtualMachine, err := pc.getVirtualMachine(vm.Spec.Name, vm.Spec.NodeName)
 	if err != nil {
 		return err
-	}
-	if virtualMachine.HasTag(proxmox.MakeTag(proxmox.TagCloudInit)) {
-		if err = virtualMachine.UnmountCloudInitISO(ctx, device); err != nil {
-			return fmt.Errorf("removing the previous cloud-init ISO of VirtualMachine %s: %w", vm.Spec.Name, err)
-		}
 	}
 	// The library appends the ISO device to the machine's boot order as
 	// "<boot>;<device>". A machine built from scratch has no boot order yet,
@@ -116,6 +113,12 @@ func (pc *ProxmoxClient) ApplyNoCloud(vm *proxmoxv1alpha1.VirtualMachine, device
 	// first disk, which is also what the guest should boot from.
 	if err = pc.ensureBootOrder(virtualMachine); err != nil {
 		return err
+	}
+	// On a rebuild the device is in the boot order already. Without it the
+	// library writes the same order back; a changed one stays pending on a
+	// running machine, and a pending change makes the reconcile reboot it.
+	if cfg := virtualMachine.VirtualMachineConfig; cfg != nil {
+		cfg.Boot = withoutBootDevice(cfg.Boot, device)
 	}
 	err = virtualMachine.CloudInit(ctx, device, data.UserData, data.MetaData, data.VendorData, data.NetworkConfig)
 	if err != nil {
@@ -145,6 +148,12 @@ func (pc *ProxmoxClient) ensureBootOrder(virtualMachine *proxmox.VirtualMachine)
 	}
 	cfg.Boot = "order=" + first
 	return nil
+}
+
+// withoutBootDevice drops device from a boot order such as
+// "order=scsi0;net0;ide2".
+func withoutBootDevice(boot, device string) string {
+	return strings.Join(slices.DeleteFunc(strings.Split(boot, ";"), func(d string) bool { return d == device }), ";")
 }
 
 // firstBootDisk picks the drive to boot from among the machine's drives:
