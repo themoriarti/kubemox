@@ -277,7 +277,7 @@ func (pc *ProxmoxClient) DeleteVM(vmName, nodeName string) error {
 		stopTask, stopErr := VirtualMachine.Stop(ctx)
 		if stopErr != nil {
 			log.Log.Error(stopErr, "Can't stop VM")
-			return &TaskError{ExitStatus: stopTask.ExitStatus}
+			return stopErr
 		}
 		taskStatus, taskCompleted, taskErr := stopTask.WaitForCompleteStatus(ctx,
 			virtualMachineStopTimesNum, virtualMachineStopSteps)
@@ -798,18 +798,18 @@ func (pc *ProxmoxClient) ConfigureVirtualMachine(vm *proxmoxv1alpha1.VirtualMach
 }
 
 func (pc *ProxmoxClient) deleteVirtualMachineOption(vm *proxmoxv1alpha1.VirtualMachine,
-	option string) (proxmox.Task, error) {
+	option string) (*proxmox.Task, error) {
 	nodeName := vm.Spec.NodeName
 	virtualMachine, err := pc.getVirtualMachine(vm.Name, nodeName)
 	if err != nil {
 		log.Log.Error(err, "Error getting VM for deleting option")
+		return nil, err
 	}
 	// Delete option
-	taskID, err := virtualMachine.Config(ctx, proxmox.VirtualMachineOption{
+	return virtualMachine.Config(ctx, proxmox.VirtualMachineOption{
 		Name:  "delete",
 		Value: option,
 	})
-	return *taskID, err
 }
 
 func (pc *ProxmoxClient) updateNetworkConfig(ctx context.Context,
@@ -929,7 +929,7 @@ func (pc *ProxmoxClient) configureVirtualMachineNetwork(vm *proxmoxv1alpha1.Virt
 		for i := len(networks); i < len(virtualMachineNetworksParsed); i++ {
 			// Remove the network configuration
 			log.Log.Info(fmt.Sprintf("Removing the network configuration for net%d of VM %s", i, vm.Spec.Name))
-			var taskID proxmox.Task
+			var taskID *proxmox.Task
 			taskID, err = pc.deleteVirtualMachineOption(vm, "net"+strconv.Itoa(i))
 			if err != nil {
 				return err
@@ -1471,11 +1471,13 @@ func (pc *ProxmoxClient) RebootVM(vmName, nodeName string) error {
 	virtualMachine, err := pc.getVirtualMachine(vmName, nodeName)
 	if err != nil {
 		log.Log.Error(err, "Error getting VM for rebooting")
+		return err
 	}
 	// Reboot VM
 	task, err := virtualMachine.Reboot(ctx)
 	if err != nil {
 		log.Log.Error(err, "Error rebooting VirtualMachine %s", vmName)
+		return err
 	}
 	taskStatus, taskCompleted, taskErr := task.WaitForCompleteStatus(ctx, 5, 3)
 	if !taskStatus {
@@ -1518,6 +1520,7 @@ func (pc *ProxmoxClient) ApplyAdditionalConfiguration(vm Resource) error {
 		})
 		if err != nil {
 			log.Log.Error(err, "Error applying additional configuration")
+			return err
 		}
 		taskStatus, taskCompleted, taskErr := task.WaitForCompleteStatus(ctx, 5, 3)
 		if !taskStatus {
