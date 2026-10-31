@@ -21,9 +21,11 @@ const (
 // refusingHost is a node with one machine. refuse makes it answer every request
 // that would start a task the way a busy Proxmox does, with no task at all.
 type refusingHost struct {
-	refuse  bool
-	exit    string   // how a task ends; empty means OK
-	deleted []string // options deleted, in order
+	refuse bool
+	// refuseReads makes the machine's status unreadable, though it is listed.
+	refuseReads bool
+	exit        string   // how a task ends; empty means OK
+	deleted     []string // options deleted, in order
 }
 
 // refusedVMStatus is the machine as /qemu and status/current list it.
@@ -39,6 +41,12 @@ type refusingTask struct {
 	ExitStatus string `json:"exitstatus"`
 }
 
+// refusedNode is the node as /nodes lists it.
+type refusedNode struct {
+	Node   string `json:"node"`
+	Status string `json:"status"`
+}
+
 func newRefusingHost(t *testing.T, h *refusingHost) *ProxmoxClient {
 	t.Helper()
 	base := "/api2/json/nodes/" + lxcTestNode
@@ -51,7 +59,14 @@ func newRefusingHost(t *testing.T, h *refusingHost) *ProxmoxClient {
 		writeCTData(w, []refusedVMStatus{machine})
 	})
 	mux.HandleFunc("GET "+base+"/qemu/100/status/current", func(w http.ResponseWriter, _ *http.Request) {
+		if h.refuseReads {
+			writePVEError(w, "got no worker upid - start worker failed")
+			return
+		}
 		writeCTData(w, machine)
+	})
+	mux.HandleFunc("GET /api2/json/nodes", func(w http.ResponseWriter, _ *http.Request) {
+		writeCTData(w, []refusedNode{{lxcTestNode, "online"}})
 	})
 	mux.HandleFunc("GET "+base+"/qemu/100/config", func(w http.ResponseWriter, _ *http.Request) {
 		writeCTData(w, map[string]any{"cores": 1})
@@ -141,5 +156,67 @@ func TestDeleteOptionReportsAFailedTask(t *testing.T) {
 	var taskErr *TaskError
 	if !errors.As(err, &taskErr) || taskErr.ExitStatus != "unable to delete" {
 		t.Fatalf("err = %v, want the task's exit status", err)
+	}
+}
+
+// A machine that is listed but cannot be read has to come back as an error, and
+// nothing may be changed on it: an unread cloud-init config used to compare as
+// different, which empties the real one.
+func TestUnreadableMachineIsAnError(t *testing.T) {
+	ciConfig := &proxmoxv1alpha1.CloudInitConfig{User: "user"}
+	template := &proxmoxv1alpha1.VirtualMachineTemplate{
+		Spec: proxmoxv1alpha1.VirtualMachineTemplateSpec{
+			Name: refusedVMName, NodeName: lxcTestNode, CloudInitConfig: ciConfig,
+		},
+	}
+	cases := map[string]func(t *testing.T, pc *ProxmoxClient) error{
+		"snapshots": func(_ *testing.T, pc *ProxmoxClient) error {
+			_, err := pc.GetVMSnapshots(refusedVMName)
+			return err
+		},
+		"remove tag": func(_ *testing.T, pc *ProxmoxClient) error {
+			return pc.RemoveVirtualMachineTag(refusedVMName, lxcTestNode, "tag")
+		},
+		"network": func(_ *testing.T, pc *ProxmoxClient) error {
+			nets := []proxmoxv1alpha1.VirtualMachineNetwork{{Model: "virtio", Bridge: "vmbr0"}}
+			return pc.updateNetworkConfig(ctx, refusedVM(), 0, nets)
+		},
+		"convert to template": func(_ *testing.T, pc *ProxmoxClient) error {
+			return pc.ConvertVMToTemplate(refusedVMName, lxcTestNode)
+		},
+		"set cloud-init": func(_ *testing.T, pc *ProxmoxClient) error {
+			return pc.SetCloudInitConfig(refusedVMName, lxcTestNode, ciConfig)
+		},
+		"empty cloud-init": func(_ *testing.T, pc *ProxmoxClient) error {
+			return pc.EmptyCloudInitConfig(refusedVMName, lxcTestNode)
+		},
+		"get cloud-init": func(_ *testing.T, pc *ProxmoxClient) error {
+			_, err := pc.GetCloudInitConfig(refusedVMName, lxcTestNode)
+			return err
+		},
+		"compare cloud-init": func(t *testing.T, pc *ProxmoxClient) error {
+			differs, err := pc.CheckVirtualMachineTemplateCIConfig(template)
+			if differs {
+				t.Error("an unread config compares as different")
+			}
+			return err
+		},
+		"cloud-init drive": func(_ *testing.T, pc *ProxmoxClient) error {
+			return pc.AddCloudInitDrive(refusedVMName, lxcTestNode)
+		},
+		"boot order": func(_ *testing.T, pc *ProxmoxClient) error {
+			return pc.SetBootOrder(refusedVMName, lxcTestNode)
+		},
+	}
+	for name, call := range cases {
+		t.Run(name, func(t *testing.T) {
+			h := &refusingHost{refuseReads: true}
+			if err := call(t, newRefusingHost(t, h)); err == nil {
+				t.Error("no error from an unreadable machine")
+			}
+			if len(h.deleted) != 0 {
+				t.Errorf("the machine was changed: %v", h.deleted)
+			}
+		})
 	}
 }
