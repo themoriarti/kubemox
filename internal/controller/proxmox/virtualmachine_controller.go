@@ -46,7 +46,6 @@ import (
 	proxmoxv1alpha1 "github.com/alperencelik/kubemox/api/proxmox/v1alpha1"
 	"github.com/alperencelik/kubemox/pkg/kubernetes"
 	"github.com/alperencelik/kubemox/pkg/proxmox"
-	"github.com/alperencelik/kubemox/pkg/utils"
 )
 
 const (
@@ -415,11 +414,7 @@ func (r *VirtualMachineReconciler) handleCreateFromTemplate(ctx context.Context,
 		if errors.As(err, &taskErr) {
 			r.Recorder.Eventf(vm, nil, "Warning", "Error", "Error",
 				fmt.Sprintf("VirtualMachine %s failed to create due to %s", vmName, err))
-			if utils.IsTimeoutError(err) {
-				return dontRequeue, err
-			}
-			r.Watcher.Unregister(client.ObjectKeyFromObject(vm))
-			return dontRequeue, reconcile.TerminalError(err)
+			return dontRequeue, r.taskFailure(vm, taskErr)
 		}
 		if updateErr := r.Status().Patch(ctx, vm, client.MergeFrom(vm.DeepCopy())); updateErr != nil {
 			return dontRequeue, updateErr
@@ -458,8 +453,7 @@ func (r *VirtualMachineReconciler) handleCreateFromScratch(ctx context.Context, 
 		if errors.As(err, &taskErr) {
 			r.Recorder.Eventf(vm, nil, "Warning", "Error", "Error",
 				fmt.Sprintf("VirtualMachine %s failed to create due to %s", vmName, err))
-			r.Watcher.Unregister(client.ObjectKeyFromObject(vm))
-			return dontRequeue, reconcile.TerminalError(err)
+			return dontRequeue, r.taskFailure(vm, taskErr)
 		}
 		if updateErr := r.Status().Patch(ctx, vm, client.MergeFrom(vm.DeepCopy())); updateErr != nil {
 			return dontRequeue, updateErr
@@ -506,8 +500,7 @@ func (r *VirtualMachineReconciler) startCreatedVM(ctx context.Context, pc *proxm
 		var taskErr *proxmox.TaskError
 		if errors.As(err, &taskErr) {
 			r.Recorder.Eventf(vm, nil, "Warning", "Error", "Error", fmt.Sprintf("VirtualMachine %s failed to start due to %s", vmName, err))
-			r.Watcher.Unregister(client.ObjectKeyFromObject(vm))
-			return dontRequeue, reconcile.TerminalError(err)
+			return dontRequeue, r.taskFailure(vm, taskErr)
 		}
 		logger.Error(err, "Failed to start VirtualMachine")
 		return dontRequeue, err
@@ -538,8 +531,7 @@ func (r *VirtualMachineReconciler) DeleteVirtualMachine(ctx context.Context,
 			var taskErr *proxmox.TaskError
 			if errors.As(err, &taskErr) {
 				r.Recorder.Eventf(vm, nil, "Warning", "Error", "Error", fmt.Sprintf("VirtualMachine %s failed to delete due to %s", vm.Spec.Name, err))
-				r.Watcher.Unregister(client.ObjectKeyFromObject(vm))
-				return dontRequeue, reconcile.TerminalError(err)
+				return dontRequeue, r.taskFailure(vm, taskErr)
 			}
 			return dontRequeue, err
 		}
@@ -577,6 +569,17 @@ func (r *VirtualMachineReconciler) handleResourceNotFound(ctx context.Context, e
 	return err
 }
 
+// taskFailure says how a reconcile ends after a failed Proxmox task. A task
+// that can work on another try gets one; any other would fail the same way, so
+// the reconcile stops and the watcher lets the machine go until its spec changes.
+func (r *VirtualMachineReconciler) taskFailure(vm *proxmoxv1alpha1.VirtualMachine, taskErr *proxmox.TaskError) error {
+	if taskErr.Transient() {
+		return taskErr
+	}
+	r.Watcher.Unregister(client.ObjectKeyFromObject(vm))
+	return reconcile.TerminalError(taskErr)
+}
+
 func (r *VirtualMachineReconciler) handleAutoStart(ctx context.Context,
 	pc *proxmox.ProxmoxClient, vm *proxmoxv1alpha1.VirtualMachine) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
@@ -593,8 +596,7 @@ func (r *VirtualMachineReconciler) handleAutoStart(ctx context.Context,
 				var taskErr *proxmox.TaskError
 				if errors.As(err, &taskErr) {
 					r.Recorder.Eventf(vm, nil, "Warning", "Error", "Error", fmt.Sprintf("VirtualMachine %s failed to start due to %s", vmName, err))
-					r.Watcher.Unregister(client.ObjectKeyFromObject(vm))
-					return dontRequeue, reconcile.TerminalError(err)
+					return dontRequeue, r.taskFailure(vm, taskErr)
 				}
 				return dontRequeue, err
 			}
@@ -617,9 +619,8 @@ func (r *VirtualMachineReconciler) UpdateVirtualMachine(ctx context.Context,
 		var taskErr *proxmox.TaskError
 		if errors.As(err, &taskErr) {
 			r.Recorder.Eventf(vm, nil, "Warning", "Error", "Error",
-				fmt.Sprintf("VirtualMachine %s failed to update due to %s", vm.Name, taskErr.ExitStatus))
-			r.Watcher.Unregister(client.ObjectKeyFromObject(vm))
-			return &dontRequeue, reconcile.TerminalError(err)
+				fmt.Sprintf("VirtualMachine %s failed to update due to %s", vm.Name, taskErr))
+			return &dontRequeue, r.taskFailure(vm, taskErr)
 		}
 		return &dontRequeue, err
 	}
@@ -641,9 +642,8 @@ func (r *VirtualMachineReconciler) UpdateVirtualMachine(ctx context.Context,
 		var taskErr *proxmox.TaskError
 		if errors.As(err, &taskErr) {
 			r.Recorder.Eventf(vm, nil, "Warning", "Error", "Error",
-				fmt.Sprintf("VirtualMachine %s failed to configure due to %s", vm.Name, taskErr.ExitStatus))
-			r.Watcher.Unregister(client.ObjectKeyFromObject(vm))
-			return &dontRequeue, reconcile.TerminalError(err)
+				fmt.Sprintf("VirtualMachine %s failed to configure due to %s", vm.Name, taskErr))
+			return &dontRequeue, r.taskFailure(vm, taskErr)
 		}
 		return &dontRequeue, err
 	}
