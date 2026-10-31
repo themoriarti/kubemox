@@ -109,7 +109,7 @@ func TestResolveSourceAcrossNamespaces(t *testing.T) {
 			}
 			r := sourceTestReconciler(objs...)
 
-			volid, res, err := r.resolveSource(ctx, vol)
+			volid, _, res, err := r.resolveSource(ctx, nil, vol)
 			if err != nil {
 				t.Fatalf("resolveSource: %v", err)
 			}

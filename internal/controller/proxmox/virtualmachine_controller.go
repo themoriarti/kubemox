@@ -508,7 +508,18 @@ func (r *VirtualMachineReconciler) startCreatedVM(ctx context.Context, pc *proxm
 	if startResult {
 		logger.Info(fmt.Sprintf("VirtualMachine %s has been started", vm.Spec.Name))
 	}
-	return ctrl.Result{}, nil
+	return ctrl.Result{}, r.markStartedOnce(ctx, vm)
+}
+
+// markStartedOnce records the one start a startOnce machine gets, so that
+// handleAutoStart leaves it alone from then on.
+func (r *VirtualMachineReconciler) markStartedOnce(ctx context.Context, vm *proxmoxv1alpha1.VirtualMachine) error {
+	if !vm.Spec.StartOnce || vm.Status.StartedOnce {
+		return nil
+	}
+	patch := client.MergeFrom(vm.DeepCopy())
+	vm.Status.StartedOnce = true
+	return client.IgnoreNotFound(r.Status().Patch(ctx, vm, patch))
 }
 
 func (r *VirtualMachineReconciler) DeleteVirtualMachine(ctx context.Context,
@@ -583,7 +594,8 @@ func (r *VirtualMachineReconciler) taskFailure(vm *proxmoxv1alpha1.VirtualMachin
 func (r *VirtualMachineReconciler) handleAutoStart(ctx context.Context,
 	pc *proxmox.ProxmoxClient, vm *proxmoxv1alpha1.VirtualMachine) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
-	if ptr.Deref(vm.Spec.EnableAutoStart, true) {
+	// A startOnce machine had its start; whatever stopped it since, it stays stopped.
+	if ptr.Deref(vm.Spec.EnableAutoStart, true) && (!vm.Spec.StartOnce || !vm.Status.StartedOnce) {
 		vmName := vm.Spec.Name
 		nodeName := vm.Spec.NodeName
 		vmState, err := pc.GetVMState(vmName, nodeName)
@@ -603,7 +615,12 @@ func (r *VirtualMachineReconciler) handleAutoStart(ctx context.Context,
 			if startResult {
 				logger.Info(fmt.Sprintf("VirtualMachine %s has been started", vm.Spec.Name))
 			}
-			return ctrl.Result{RequeueAfter: time.Second}, nil
+			return ctrl.Result{RequeueAfter: time.Second}, r.markStartedOnce(ctx, vm)
+		}
+		// Found running: a machine the operator did not start itself, or one
+		// started before this field existed, counts as started.
+		if err := r.markStartedOnce(ctx, vm); err != nil {
+			return ctrl.Result{}, err
 		}
 	}
 	return ctrl.Result{}, nil

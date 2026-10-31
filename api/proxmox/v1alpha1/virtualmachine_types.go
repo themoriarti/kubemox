@@ -57,6 +57,11 @@ type VirtualMachineSpec struct {
 	// If not set, it defaults to true.
 	// +kubebuilder:default:=true
 	EnableAutoStart *bool `json:"enableAutoStart,omitempty"`
+	// StartOnce starts the machine once, when it is created or first found
+	// stopped, and then leaves it alone: a machine that stops stays stopped.
+	// Only meaningful with EnableAutoStart on, which it narrows.
+	// +optional
+	StartOnce bool `json:"startOnce,omitempty"`
 	// Pool is the Proxmox resource pool the machine is created in. It is
 	// applied at creation; a change afterwards is not applied.
 	// +optional
@@ -379,6 +384,10 @@ type VirtualMachineStatus struct {
 	// CloudInit is the NoCloud datasource attached from spec.vmSpec.cloudInit.
 	// +optional
 	CloudInit *VirtualMachineCloudInitStatus `json:"cloudInit,omitempty"`
+	// StartedOnce records that a machine with spec.startOnce has had its one
+	// start; the operator does not start it again.
+	// +optional
+	StartedOnce bool `json:"startedOnce,omitempty"`
 }
 
 // +kubebuilder:object:root=true

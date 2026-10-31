@@ -8,6 +8,7 @@ rules:
   - ""
   resources:
   - secrets
+  - services
   verbs:
   - get
   - list
@@ -32,6 +33,18 @@ rules:
   verbs:
   - get
   - list
+  - watch
+- apiGroups:
+  - discovery.k8s.io
+  resources:
+  - endpointslices
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
   - watch
 - apiGroups:
   - ipam.cluster.x-k8s.io

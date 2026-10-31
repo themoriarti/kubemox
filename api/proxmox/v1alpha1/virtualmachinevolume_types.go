@@ -48,9 +48,16 @@ type VirtualMachineVolumeSpec struct {
 	// +kubebuilder:validation:MinLength=1
 	Storage string `json:"storage"`
 	// Size is the size of the disk in GiB. It can be raised later, which
-	// grows the volume in place; it cannot be lowered.
+	// grows the volume in place; it cannot be lowered. Ignored for an
+	// optical volume, whose size is that of the image.
 	// +kubebuilder:validation:Minimum=1
 	Size int `json:"size"`
+	// Optical makes the volume a CD-ROM image rather than a disk: the file
+	// is kept as iso content of Storage, needs no holder, and a
+	// VirtualMachine attaches it read-only as a cdrom. Its source is an
+	// http or upload source, or a volume id of iso content.
+	// +kubebuilder:default:=false
+	Optical bool `json:"optical,omitempty"`
 	// Source populates the disk when it is created. Leave it empty for a
 	// blank disk.
 	// +optional
@@ -73,7 +80,7 @@ type VirtualMachineVolumeSpec struct {
 // VirtualMachineVolumeSource says where the data of a new disk comes from.
 // Exactly one of the fields is set.
 //
-// +kubebuilder:validation:XValidation:rule="has(self.volume) != has(self.disk)",message="exactly one of volume or disk must be set"
+// +kubebuilder:validation:XValidation:rule="[has(self.volume), has(self.disk), has(self.http), has(self.upload)].filter(x, x).size() == 1",message="exactly one of volume, disk, http or upload must be set"
 //
 //nolint:lll // CEL validation rules are too long
 type VirtualMachineVolumeSource struct {
@@ -90,6 +97,54 @@ type VirtualMachineVolumeSource struct {
 	// marked cloneable.
 	// +optional
 	Disk *VirtualMachineVolumeDiskSource `json:"disk,omitempty"`
+	// HTTP downloads an image and imports it. The operator fetches the URL
+	// itself and streams the bytes into the storage through the Proxmox
+	// upload API, so the hypervisor never talks to the URL; the file is
+	// removed once the disk is populated from it.
+	// +optional
+	HTTP *VirtualMachineVolumeHTTPSource `json:"http,omitempty"`
+	// Upload waits for an image to be uploaded by hand. The operator
+	// publishes where it expects the file in status.uploadTarget and
+	// populates the disk once a file of that name, with any extension,
+	// appears there; the file is removed afterwards.
+	// +optional
+	Upload *VirtualMachineVolumeUploadSource `json:"upload,omitempty"`
+}
+
+// VirtualMachineVolumeHTTPSource is an image to download.
+type VirtualMachineVolumeHTTPSource struct {
+	// URL of the image: qcow2, raw, vmdk or an OVA, told apart by the
+	// extension of the URL's path. For an optical volume, an ISO.
+	// +kubebuilder:validation:Pattern=`^https?://`
+	URL string `json:"url"`
+	// Storage with the import (or, for an optical volume, iso) content type
+	// on the volume's node that receives the file. Defaults to the
+	// volume's storage.
+	// +optional
+	Storage string `json:"storage,omitempty"`
+}
+
+// VirtualMachineVolumeUploadSource is an image someone uploads.
+type VirtualMachineVolumeUploadSource struct {
+	// Storage with the import (or, for an optical volume, iso) content type
+	// on the volume's node that receives the file. Defaults to the
+	// volume's storage.
+	// +optional
+	Storage string `json:"storage,omitempty"`
+}
+
+// VirtualMachineVolumeUploadTarget is where an upload source expects its
+// file.
+type VirtualMachineVolumeUploadTarget struct {
+	// Node whose storage receives the file.
+	Node string `json:"node"`
+	// Storage that receives the file.
+	Storage string `json:"storage"`
+	// Content type the file is uploaded as: import, or iso for an optical volume.
+	Content string `json:"content"`
+	// Filename the file has to carry, without its extension; any extension
+	// Proxmox accepts for the content type does.
+	Filename string `json:"filename"`
 }
 
 // VirtualMachineVolumeDiskSource names the VirtualMachineVolume a new disk
@@ -143,6 +198,10 @@ type VirtualMachineVolumeStatus struct {
 	// the disk. Empty while the disk sits on the holder.
 	// +optional
 	AttachedTo string `json:"attachedTo,omitempty"`
+	// UploadTarget is where an upload source expects its file, set while the
+	// operator waits for it.
+	// +optional
+	UploadTarget *VirtualMachineVolumeUploadTarget `json:"uploadTarget,omitempty"`
 	// LastObserved is when the volume was last seen on Proxmox.
 	// +optional
 	LastObserved *metav1.Time `json:"lastObserved,omitempty"`
@@ -161,6 +220,9 @@ const (
 	VirtualMachineVolumePhaseAttached = "Attached"
 	// VirtualMachineVolumePhaseFailed is set when Proxmox refused an operation.
 	VirtualMachineVolumePhaseFailed = "Failed"
+	// VirtualMachineVolumeOpticalSlot is the slot an optical volume reports
+	// while no VirtualMachine has it: an ISO file has no holder and no drive.
+	VirtualMachineVolumeOpticalSlot = "iso"
 )
 
 // +kubebuilder:object:root=true
