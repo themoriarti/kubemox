@@ -39,6 +39,7 @@ func (pc *ProxmoxClient) CheckVirtualMachineTemplateDelta(
 	cloudInitDiff, err := pc.CheckVirtualMachineTemplateCIConfig(vmTemplate)
 	if err != nil {
 		log.Log.Error(err, "Error checking cloud-init config")
+		return false, err
 	}
 	// Compare the actual VM with the desired VM with spec and cloud-init config
 	if !reflect.DeepEqual(actualMachineSpec, desiredMachineSpec) || cloudInitDiff {
@@ -51,6 +52,7 @@ func (pc *ProxmoxClient) ConvertVMToTemplate(vmName, nodeName string) error {
 	VirtualMachine, err := pc.getVirtualMachine(vmName, nodeName)
 	if err != nil {
 		log.Log.Error(err, "Error getting VM for converting to template")
+		return err
 	}
 	// If the VM is not a template, convert it to a template
 	if !VirtualMachine.Template {
@@ -72,11 +74,13 @@ func (pc *ProxmoxClient) SetCloudInitConfig(vmName, nodeName string, ciConfig *p
 	VirtualMachine, err := pc.getVirtualMachine(vmName, nodeName)
 	if err != nil {
 		log.Log.Error(err, "Error getting VM for updating cloud-init config")
+		return err
 	}
 	// Get cloud-init configuration and compare with the desired state
 	actualCloudInitConfig, err := pc.GetCloudInitConfig(vmName, nodeName)
 	if err != nil {
 		log.Log.Error(err, "Error getting cloud-init config")
+		return err
 	}
 
 	// Compare with the desired VM
@@ -87,6 +91,7 @@ func (pc *ProxmoxClient) SetCloudInitConfig(vmName, nodeName string, ciConfig *p
 		err := pc.EmptyCloudInitConfig(vmName, nodeName)
 		if err != nil {
 			log.Log.Error(err, "Error emptying cloud-init config")
+			return err
 		}
 		// Update cloud-init config
 		task, err := VirtualMachine.Config(ctx, CloudInitOptions...)
@@ -168,6 +173,7 @@ func (pc *ProxmoxClient) AddCloudInitDrive(vmName, nodeName string) error {
 	VirtualMachine, err := pc.getVirtualMachine(vmName, nodeName)
 	if err != nil {
 		log.Log.Error(err, "Error getting VM for adding cloud-init drive")
+		return err
 	}
 	// Check if cloud-init drive is already added or not
 	cloudInitDrive := VirtualMachine.VirtualMachineConfig.IDEs["ide2"]
@@ -200,6 +206,7 @@ func (pc *ProxmoxClient) SetBootOrder(vmName, nodeName string) error {
 	VirtualMachine, err := pc.getVirtualMachine(vmName, nodeName)
 	if err != nil {
 		log.Log.Error(err, "Error getting VM for setting boot order")
+		return err
 	}
 	// Set boot order
 	task, err := VirtualMachine.Config(ctx, proxmox.VirtualMachineOption{
@@ -215,18 +222,6 @@ func (pc *ProxmoxClient) SetBootOrder(vmName, nodeName string) error {
 		log.Log.Error(taskErr, "Can't set boot order for VM")
 	}
 	return nil
-}
-
-func (pc *ProxmoxClient) IsVMTemplate(vmName, nodeName string) bool {
-	VirtualMachine, err := pc.getVirtualMachine(vmName, nodeName)
-	if err != nil {
-		log.Log.Error(err, "Error getting VM for checking if it's a template")
-	}
-	if VirtualMachine.Template {
-		return true
-	} else {
-		return false
-	}
 }
 
 func (pc *ProxmoxClient) CreateVMTemplate(vmTemplate *proxmoxv1alpha1.VirtualMachineTemplate) (*proxmox.Task, error) {
@@ -340,6 +335,7 @@ func (pc *ProxmoxClient) CheckVirtualMachineTemplateCIConfig(vmTemplate *proxmox
 	actualCloudInitConfig, err := pc.GetCloudInitConfig(vmTemplate.Spec.Name, vmTemplate.Spec.NodeName)
 	if err != nil {
 		log.Log.Error(err, "Error getting cloud-init config")
+		return false, err
 	}
 	// Compare with the desired cloud-init config
 	if !cmp.Equal(desiredCloudInitConfig, actualCloudInitConfig,
@@ -435,6 +431,7 @@ func (pc *ProxmoxClient) GetCloudInitConfig(vmName, nodeName string) (proxmoxv1a
 	VirtualMachine, err := pc.getVirtualMachine(vmName, nodeName)
 	if err != nil {
 		log.Log.Error(err, "Error getting VM for getting cloud-init config")
+		return proxmoxv1alpha1.CloudInitConfig{}, err
 	}
 	virtualMachineConfig := VirtualMachine.VirtualMachineConfig
 	cloudInitConfig := &proxmoxv1alpha1.CloudInitConfig{
@@ -453,6 +450,7 @@ func (pc *ProxmoxClient) EmptyCloudInitConfig(vmName, nodeName string) error {
 	VirtualMachine, err := pc.getVirtualMachine(vmName, nodeName)
 	if err != nil {
 		log.Log.Error(err, "Error getting VM for emptying cloud-init config")
+		return err
 	}
 	// Empty the current cloud-init config
 	EmptyCloudInitOptions := []proxmox.VirtualMachineOption{

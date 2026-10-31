@@ -252,18 +252,6 @@ func (pc *ProxmoxClient) GetOSInfo(vmName, nodeName string) string {
 	}
 }
 
-func (pc *ProxmoxClient) GetVMUptime(vmName, nodeName string) string {
-	VirtualMachine, err := pc.getVirtualMachine(vmName, nodeName)
-	if err != nil {
-		log.Log.Error(err, "Error getting VM")
-	}
-	// Get VM Uptime as seconds
-	VirtualMachineUptime := int(VirtualMachine.Uptime)
-	// Convert seconds to format like 1d 2h 3m 4s
-	uptime := utils.FormatUptime(VirtualMachineUptime)
-	return uptime
-}
-
 func (pc *ProxmoxClient) DeleteVM(vmName, nodeName string) error {
 	VirtualMachine, err := pc.getVirtualMachine(vmName, nodeName)
 	if err != nil {
@@ -542,7 +530,7 @@ func (pc *ProxmoxClient) UpdateVMStatus(vmName, nodeName string) (*proxmoxv1alph
 			State:     VirtualMachine.Status,
 			ID:        int(VirtualMachine.VMID),
 			Node:      VirtualMachine.Node,
-			Uptime:    pc.GetVMUptime(vmName, nodeName),
+			Uptime:    utils.FormatUptime(int(VirtualMachine.Uptime)),
 			IPAddress: VirtualMachineIP,
 			OSInfo:    VirtualMachineOS,
 		}
@@ -658,21 +646,24 @@ func (pc *ProxmoxClient) GetVMSnapshots(vmName string) ([]string, error) {
 	nodeName, err := pc.GetNodeOfVM(vmName)
 	if err != nil {
 		log.Log.Error(err, "Error getting node of VM for snapshot listing")
+		return nil, err
 	}
 	VirtualMachine, err := pc.getVirtualMachine(vmName, nodeName)
 	if err != nil {
 		log.Log.Error(err, "Error getting VM for snapshot listing")
+		return nil, err
 	}
 	// Get snapshots
 	snapshots, err := VirtualMachine.Snapshots(ctx)
 	if err != nil {
 		log.Log.Error(err, "Error getting snapshots")
+		return nil, err
 	}
 	snapshotNames := make([]string, 0, len(snapshots))
 	for _, snapshot := range snapshots {
 		snapshotNames = append(snapshotNames, snapshot.Name)
 	}
-	return snapshotNames, err
+	return snapshotNames, nil
 }
 
 func (pc *ProxmoxClient) VMSnapshotExists(vmName, snapshotName string) bool {
@@ -693,6 +684,7 @@ func (pc *ProxmoxClient) RemoveVirtualMachineTag(vmName, nodeName, tag string) e
 	VirtualMachine, err := pc.getVirtualMachine(vmName, nodeName)
 	if err != nil {
 		log.Log.Error(err, "Error getting VM for removing tag")
+		return err
 	}
 	removeTagTask, err := VirtualMachine.RemoveTag(ctx, tag)
 	if err != nil {
