@@ -71,20 +71,20 @@ func applyChanges[I any](
 	for _, item := range itemsToDelete {
 		deviceID := getDeviceID(item)
 		log.Log.Info(fmt.Sprintf("Deleting %s %s of VirtualMachine %s", operationName, deviceID, vm.Name))
-		if task, err := pc.deleteVirtualMachineOption(vm, deviceID); err != nil {
-			taskStatus, taskCompleted, taskErr := task.WaitForCompleteStatus(ctx, 3, 10)
-			if !taskStatus {
-				// Return the task.ExitStatus
-				return &TaskError{ExitStatus: task.ExitStatus}
-			}
-			if !taskCompleted {
-				log.Log.Error(taskErr, fmt.Sprintf("Failed to delete %s %s of VirtualMachine %s", operationName, deviceID, vm.Name))
-				return taskErr
-			}
+		task, err := pc.deleteVirtualMachineOption(vm, deviceID)
+		if err != nil {
 			return err
-		} else {
-			log.Log.Info(fmt.Sprintf("%s %s of VirtualMachine %s has been deleted", operationName, deviceID, vm.Name))
 		}
+		taskStatus, taskCompleted, taskErr := task.WaitForCompleteStatus(ctx, 3, 10)
+		if !taskStatus {
+			// Return the task.ExitStatus
+			return &TaskError{ExitStatus: task.ExitStatus}
+		}
+		if !taskCompleted {
+			log.Log.Error(taskErr, fmt.Sprintf("Failed to delete %s %s of VirtualMachine %s", operationName, deviceID, vm.Name))
+			return taskErr
+		}
+		log.Log.Info(fmt.Sprintf("%s %s of VirtualMachine %s has been deleted", operationName, deviceID, vm.Name))
 	}
 	return nil
 }
