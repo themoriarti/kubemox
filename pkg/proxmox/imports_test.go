@@ -11,6 +11,15 @@ import (
 	"github.com/luthermonson/go-proxmox"
 )
 
+const (
+	importTestStorage = "local"
+	keyExitStatus     = "exitstatus"
+	keyUser           = "user"
+	keyFormat         = "format"
+	keySize           = "size"
+	keyVolid          = "volid"
+)
+
 func TestImportFilename(t *testing.T) {
 	cases := map[string]string{
 		"https://cloud-images.example.org/noble/noble-server-cloudimg-amd64.img?x=1": "vmvol-tenant-a-web.img",
@@ -45,7 +54,7 @@ func (f *fakeStorageAPI) handler(t *testing.T) http.Handler {
 		writeJSON(w, map[string]any{})
 	})
 	mux.HandleFunc("/api2/json/nodes/pve1/storage/local/status", func(w http.ResponseWriter, _ *http.Request) {
-		writeJSON(w, map[string]any{"storage": "local", "content": "iso,import"})
+		writeJSON(w, map[string]any{"storage": importTestStorage, "content": "iso,import"})
 	})
 	mux.HandleFunc("/api2/json/nodes/pve1/storage/local/content", func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, f.content)
@@ -76,9 +85,9 @@ func (f *fakeStorageAPI) handler(t *testing.T) http.Handler {
 		writeJSON(w, "UPID:pve1:0000AAAA:0000BBBB:0000CCCC:imgcopy:0:root@pam:")
 	})
 	mux.HandleFunc("/api2/json/nodes/pve1/tasks/", func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(w, map[string]any{keyStatus: stateStopped, "exitstatus": "OK", "node": "pve1",
+		writeJSON(w, map[string]any{keyStatus: stateStopped, keyExitStatus: "OK", "node": fakeNode,
 			"upid": strings.Split(strings.TrimPrefix(r.URL.Path, "/api2/json/nodes/pve1/tasks/"), "/")[0],
-			"type": "imgcopy", "user": "root@pam", "id": "0"})
+			"type": "imgcopy", keyUser: "root@pam", "id": "0"})
 	})
 	return mux
 }
@@ -119,47 +128,49 @@ func TestUploadFromURLStreamsAndSpools(t *testing.T) {
 	pc := storageTestClient(t, f.handler(t))
 	ctx := context.Background()
 
-	volid, err := pc.UploadFromURL(ctx, fakeNode, "local", ContentImport, "vmvol-a-b.qcow2", src.URL+"/sized.qcow2")
+	volid, err := pc.UploadFromURL(ctx, fakeNode, importTestStorage, ContentImport, "vmvol-a-b.qcow2",
+		src.URL+"/sized.qcow2")
 	if err != nil {
 		t.Fatalf("UploadFromURL: %v", err)
 	}
 	if volid != "local:import/vmvol-a-b.qcow2" || f.uploaded["import/vmvol-a-b.qcow2"] != int64(len(image)) {
 		t.Fatalf("volid %q, uploaded %v", volid, f.uploaded)
 	}
-	_, err = pc.UploadFromURL(ctx, fakeNode, "local", ContentISO, "vmvol-a-c.iso", src.URL+"/chunked.qcow2")
+	_, err = pc.UploadFromURL(ctx, fakeNode, importTestStorage, ContentISO, "vmvol-a-c.iso", src.URL+"/chunked.qcow2")
 	if err != nil {
 		t.Fatalf("UploadFromURL chunked: %v", err)
 	}
 	if f.uploaded["iso/vmvol-a-c.iso"] != int64(len(image)) {
 		t.Fatalf("spooled upload received %d bytes", f.uploaded["iso/vmvol-a-c.iso"])
 	}
-	if _, err = pc.UploadFromURL(ctx, fakeNode, "local", ContentImport, "x.qcow2", src.URL+"/missing.qcow2"); err == nil ||
-		!strings.Contains(err.Error(), "HTTP 404") {
+	_, err = pc.UploadFromURL(ctx, fakeNode, importTestStorage, ContentImport, "x.qcow2", src.URL+"/missing.qcow2")
+	if err == nil || !strings.Contains(err.Error(), "HTTP 404") {
 		t.Fatalf("missing source: err = %v", err)
 	}
 }
 
 func TestFindHasAndDeleteStorageFile(t *testing.T) {
 	f := &fakeStorageAPI{content: []map[string]any{
-		{"volid": "local:import/other.qcow2", "format": "qcow2", "size": 1},
-		{"volid": "local:import/vmvol-tenant-a-web.vmdk", "format": "vmdk", "size": 1},
-		{"volid": "local:import/vmvol-tenant-a-webserver.qcow2", "format": "qcow2", "size": 1},
+		{keyVolid: "local:import/other.qcow2", keyFormat: "qcow2", keySize: 1},
+		{keyVolid: "local:import/vmvol-tenant-a-web.vmdk", keyFormat: "vmdk", keySize: 1},
+		{keyVolid: "local:import/vmvol-tenant-a-webserver.qcow2", keyFormat: "qcow2", keySize: 1},
 	}}
 	pc := storageTestClient(t, f.handler(t))
 	ctx := context.Background()
 
-	got, err := pc.FindStorageFile(ctx, fakeNode, "local", ContentImport, "vmvol-tenant-a-web")
+	got, err := pc.FindStorageFile(ctx, fakeNode, importTestStorage, ContentImport, "vmvol-tenant-a-web")
 	if err != nil || got != "local:import/vmvol-tenant-a-web.vmdk" {
 		t.Fatalf("FindStorageFile = %q, %v", got, err)
 	}
-	if got, err = pc.FindStorageFile(ctx, fakeNode, "local", ContentImport, "vmvol-tenant-a-db"); err != nil || got != "" {
+	got, err = pc.FindStorageFile(ctx, fakeNode, importTestStorage, ContentImport, "vmvol-tenant-a-db")
+	if err != nil || got != "" {
 		t.Fatalf("FindStorageFile(absent) = %q, %v", got, err)
 	}
-	present, err := pc.HasStorageFile(ctx, fakeNode, "local", "local:import/other.qcow2")
+	present, err := pc.HasStorageFile(ctx, fakeNode, importTestStorage, "local:import/other.qcow2")
 	if err != nil || !present {
 		t.Fatalf("HasStorageFile = %v, %v", present, err)
 	}
-	if err = pc.DeleteStorageFile(ctx, fakeNode, "local", "local:import/other.qcow2"); err != nil {
+	if err = pc.DeleteStorageFile(ctx, fakeNode, importTestStorage, "local:import/other.qcow2"); err != nil {
 		t.Fatalf("DeleteStorageFile: %v", err)
 	}
 	if len(f.deleted) != 1 || f.deleted[0] != "local:import/other.qcow2" {
