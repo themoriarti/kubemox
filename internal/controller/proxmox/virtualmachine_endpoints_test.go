@@ -17,6 +17,8 @@ import (
 	proxmoxv1alpha1 "github.com/alperencelik/kubemox/api/proxmox/v1alpha1"
 )
 
+const endpointsTestName = "web"
+
 func endpointsTestReconciler(objs ...client.Object) *VirtualMachineReconciler {
 	scheme := runtime.NewScheme()
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
@@ -29,14 +31,14 @@ func endpointsTestReconciler(objs ...client.Object) *VirtualMachineReconciler {
 func TestReconcileExternalEndpoints(t *testing.T) {
 	ctx := context.Background()
 	vm := &proxmoxv1alpha1.VirtualMachine{
-		ObjectMeta: metav1.ObjectMeta{Name: "web", Namespace: "tenant-a", UID: "vm-uid",
-			Annotations: map[string]string{ExternalServiceAnnotation: "web"}},
-		Spec: proxmoxv1alpha1.VirtualMachineSpec{Name: "web", NodeName: "pve1"},
+		ObjectMeta: metav1.ObjectMeta{Name: endpointsTestName, Namespace: sourceTestTenant, UID: "vm-uid",
+			Annotations: map[string]string{ExternalServiceAnnotation: endpointsTestName}},
+		Spec: proxmoxv1alpha1.VirtualMachineSpec{Name: endpointsTestName, NodeName: sourceTestNode},
 		Status: proxmoxv1alpha1.VirtualMachineStatus{Networks: []proxmoxv1alpha1.VirtualMachineNetworkStatus{
 			{Index: 0, Address: "10.0.0.5/24"}, {Index: 1}, {Index: 2, Address: "192.168.7.9/24"}}},
 	}
 	svc := &corev1.Service{
-		ObjectMeta: metav1.ObjectMeta{Name: "web", Namespace: "tenant-a"},
+		ObjectMeta: metav1.ObjectMeta{Name: endpointsTestName, Namespace: sourceTestTenant},
 		Spec: corev1.ServiceSpec{Ports: []corev1.ServicePort{
 			{Name: "port-22", Port: 22, TargetPort: intstr.FromInt32(22)},
 			{Name: "port-80", Port: 8080, TargetPort: intstr.FromInt32(80), Protocol: corev1.ProtocolTCP},
@@ -47,10 +49,10 @@ func TestReconcileExternalEndpoints(t *testing.T) {
 		t.Fatalf("reconcileExternalEndpoints: %v", err)
 	}
 	slice := &discoveryv1.EndpointSlice{}
-	if err := r.Get(ctx, client.ObjectKey{Namespace: "tenant-a", Name: "web-vm"}, slice); err != nil {
+	if err := r.Get(ctx, client.ObjectKey{Namespace: sourceTestTenant, Name: endpointsTestName + "-vm"}, slice); err != nil {
 		t.Fatalf("EndpointSlice not written: %v", err)
 	}
-	if slice.Labels[discoveryv1.LabelServiceName] != "web" || slice.AddressType != discoveryv1.AddressTypeIPv4 {
+	if slice.Labels[discoveryv1.LabelServiceName] != endpointsTestName || slice.AddressType != discoveryv1.AddressTypeIPv4 {
 		t.Fatalf("labels/type: %v %s", slice.Labels, slice.AddressType)
 	}
 	if len(slice.Endpoints) != 1 || len(slice.Endpoints[0].Addresses) != 2 ||
@@ -60,7 +62,7 @@ func TestReconcileExternalEndpoints(t *testing.T) {
 	if len(slice.Ports) != 2 || *slice.Ports[1].Port != 80 || *slice.Ports[0].Protocol != corev1.ProtocolTCP {
 		t.Fatalf("ports = %+v", slice.Ports)
 	}
-	if len(slice.OwnerReferences) != 1 || slice.OwnerReferences[0].Name != "web" {
+	if len(slice.OwnerReferences) != 1 || slice.OwnerReferences[0].Name != endpointsTestName {
 		t.Fatalf("owner = %+v", slice.OwnerReferences)
 	}
 
@@ -69,7 +71,7 @@ func TestReconcileExternalEndpoints(t *testing.T) {
 	if err := r.reconcileExternalEndpoints(ctx, vm); err != nil {
 		t.Fatalf("reconcileExternalEndpoints without annotation: %v", err)
 	}
-	if err := r.Get(ctx, client.ObjectKey{Namespace: "tenant-a", Name: "web-vm"}, slice); err == nil {
+	if err := r.Get(ctx, client.ObjectKey{Namespace: sourceTestTenant, Name: endpointsTestName + "-vm"}, slice); err == nil {
 		t.Fatal("EndpointSlice survived the annotation's removal")
 	}
 
@@ -83,8 +85,8 @@ func TestReconcileExternalEndpoints(t *testing.T) {
 func TestMarkStartedOnce(t *testing.T) {
 	ctx := context.Background()
 	vm := &proxmoxv1alpha1.VirtualMachine{
-		ObjectMeta: metav1.ObjectMeta{Name: "once", Namespace: "tenant-a"},
-		Spec:       proxmoxv1alpha1.VirtualMachineSpec{Name: "once", NodeName: "pve1", StartOnce: true},
+		ObjectMeta: metav1.ObjectMeta{Name: "once", Namespace: sourceTestTenant},
+		Spec:       proxmoxv1alpha1.VirtualMachineSpec{Name: "once", NodeName: sourceTestNode, StartOnce: true},
 	}
 	r := endpointsTestReconciler(vm)
 	if err := r.markStartedOnce(ctx, vm); err != nil {
@@ -95,8 +97,8 @@ func TestMarkStartedOnce(t *testing.T) {
 		t.Fatalf("StartedOnce not recorded: %v %v", got.Status.StartedOnce, err)
 	}
 	plain := &proxmoxv1alpha1.VirtualMachine{
-		ObjectMeta: metav1.ObjectMeta{Name: "always", Namespace: "tenant-a"},
-		Spec:       proxmoxv1alpha1.VirtualMachineSpec{Name: "always", NodeName: "pve1"},
+		ObjectMeta: metav1.ObjectMeta{Name: "always", Namespace: sourceTestTenant},
+		Spec:       proxmoxv1alpha1.VirtualMachineSpec{Name: "always", NodeName: sourceTestNode},
 	}
 	r = endpointsTestReconciler(plain)
 	if err := r.markStartedOnce(ctx, plain); err != nil || plain.Status.StartedOnce {
