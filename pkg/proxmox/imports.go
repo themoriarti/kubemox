@@ -57,7 +57,8 @@ func StorageFileVolid(storage, content, filename string) string {
 // content type, to the storage of node. It blocks for the whole transfer and
 // returns the volume id of the file. A body of unknown length is spooled to a
 // temporary file first, because the upload API wants Content-Length.
-func (pc *ProxmoxClient) UploadFromURL(ctx context.Context, node, storage, content, filename, source string) (string, error) {
+func (pc *ProxmoxClient) UploadFromURL(ctx context.Context, node, storage, content, filename, source string,
+) (string, error) {
 	ctx, cancel := context.WithTimeout(ctx, importDownloadTimeout)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, source, http.NoBody)

@@ -595,7 +595,7 @@ func (r *VirtualMachineReconciler) handleAutoStart(ctx context.Context,
 	pc *proxmox.ProxmoxClient, vm *proxmoxv1alpha1.VirtualMachine) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
 	// A startOnce machine had its start; whatever stopped it since, it stays stopped.
-	if ptr.Deref(vm.Spec.EnableAutoStart, true) && !(vm.Spec.StartOnce && vm.Status.StartedOnce) {
+	if ptr.Deref(vm.Spec.EnableAutoStart, true) && (!vm.Spec.StartOnce || !vm.Status.StartedOnce) {
 		vmName := vm.Spec.Name
 		nodeName := vm.Spec.NodeName
 		vmState, err := pc.GetVMState(vmName, nodeName)

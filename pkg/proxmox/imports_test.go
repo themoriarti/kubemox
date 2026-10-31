@@ -126,7 +126,8 @@ func TestUploadFromURLStreamsAndSpools(t *testing.T) {
 	if volid != "local:import/vmvol-a-b.qcow2" || f.uploaded["import/vmvol-a-b.qcow2"] != int64(len(image)) {
 		t.Fatalf("volid %q, uploaded %v", volid, f.uploaded)
 	}
-	if _, err = pc.UploadFromURL(ctx, fakeNode, "local", ContentISO, "vmvol-a-c.iso", src.URL+"/chunked.qcow2"); err != nil {
+	_, err = pc.UploadFromURL(ctx, fakeNode, "local", ContentISO, "vmvol-a-c.iso", src.URL+"/chunked.qcow2")
+	if err != nil {
 		t.Fatalf("UploadFromURL chunked: %v", err)
 	}
 	if f.uploaded["iso/vmvol-a-c.iso"] != int64(len(image)) {
