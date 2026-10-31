@@ -118,7 +118,7 @@ func (r *VirtualMachineReconciler) reconcileVolumes(ctx context.Context, pc *pro
 		if err != nil {
 			r.volumeEvent(vm, "Warning", "Error", "attaching VirtualMachineVolume %s at %s: %v", vol.Name, ref.Device, err)
 			var taskErr *proxmox.TaskError
-			if errors.As(err, &taskErr) {
+			if errors.As(err, &taskErr) && !taskErr.Transient() {
 				return &dontRequeue, reconcile.TerminalError(err)
 			}
 			return nil, err
