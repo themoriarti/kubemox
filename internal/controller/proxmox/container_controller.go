@@ -488,6 +488,9 @@ func (r *ContainerReconciler) handleContainerDeletion(ctx context.Context,
 		var taskErr *proxmox.TaskError
 		if errors.As(err, &taskErr) {
 			r.Recorder.Eventf(container, nil, "Warning", "Error", "Error", fmt.Sprintf("Container %s failed to delete due to %s", containerName, err))
+			if taskErr.Transient() {
+				return err
+			}
 			return reconcile.TerminalError(err)
 		}
 		return err
