@@ -158,6 +158,9 @@ func (r *VirtualMachineReconciler) reconcileNetworkIPs(ctx context.Context, pc *
 	if err = r.recordNetworkStatus(ctx, pc, vm, ips); err != nil {
 		return nil, err
 	}
+	if err = r.reconcileExternalEndpoints(ctx, vm); err != nil {
+		return nil, err
+	}
 	if len(waiting) > 0 {
 		msg := fmt.Sprintf("waiting for an IPAddress on claim %s", strings.Join(waiting, ", "))
 		r.networkEvent(vm, "Normal", reasonWaitingForIPAddress, "%s", msg)

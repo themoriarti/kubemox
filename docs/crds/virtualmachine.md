@@ -216,6 +216,7 @@ spec:
 ```
 
 - `enableAutoStart: true` keeps the machine running: one found stopped on the next watcher poll (60 s) is started again. `false` means the operator never starts it: a new machine is created stopped and an existing one stays in whatever power state it is in. To keep a machine off, set `false` and power it off.
+- `startOnce: true` narrows that to one start: the machine is started when created, or when first found stopped, and `status.startedOnce` then records it; a machine that stops afterwards stays stopped. A machine already running when the field is set counts as started.
 - `pool` and the firmware disks (`efiDisk`, `tpm`) are applied when the machine is created and left alone afterwards. `bios`, `machine`, `scsiController`, `smbiosUUID` and `tags` are kept in line on every reconcile; a changed BIOS or UUID applies on the next boot, nothing restarts the machine for it. Tags present on the machine but not listed are left alone.
 - A new `smbiosUUID` is what cloud-init takes as a new instance, so it runs again on the next boot.
     network:
@@ -229,6 +230,18 @@ spec:
 `vlan` tags the port on the bridge. `ipAddressClaimRef` names an `IPAddressClaim` (`ipam.cluster.x-k8s.io/v1beta1`) in the same namespace; once an IPAM provider binds it to an `IPAddress`, the address, prefix and gateway are written into the matching `ipconfigN` of the machine, which a cloud-init drive turns into the guest's network configuration. Until every claimed port has its address the machine is not started, and the `NetworkReady` condition says which claim it waits for. `status.networks` lists each port with its MAC and the address it got.
 
 Changing a port's bridge or VLAN keeps its MAC: the guest sees the same network card on another network, not a new card. The operator only reads the IPAM objects; it does not create claims, and on a cluster without the IPAM CRDs a ref is reported as `IPAMUnavailable`.
+
+## Publishing a machine through a Service
+
+A machine is no pod, so a Service cannot select it. Render the Service without a selector and name it on the machine:
+
+```yaml
+metadata:
+  annotations:
+    networking.cozystack.io/service: web
+```
+
+The operator then keeps an EndpointSlice `web-vm` (label `kubernetes.io/service-name: web`, managed by `kubemox`, owned by the machine) whose addresses are the ones in `status.networks` and whose ports are the Service's target ports. Removing the annotation removes the slice; a Service that does not exist is reported as an event.
 
 ## cloud-init from a Secret (NoCloud)
 
