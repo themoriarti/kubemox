@@ -45,6 +45,7 @@ type fakeLXCHost struct {
 	mu    sync.Mutex
 	url   string // API base URL, for a ProxmoxConnection endpoint
 	cts   map[int]*fakeCT
+	vms   map[int]*powerVM
 	calls []string // "METHOD path" in order
 }
 
@@ -115,6 +116,12 @@ func (f *fakeLXCHost) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			list = append(list, ct.summary(id))
 		}
 		writeCTData(w, list)
+	case path == "/qemu":
+		f.serveVMList(w)
+	case fakeVMPath.MatchString(path):
+		m := fakeVMPath.FindStringSubmatch(path)
+		id, _ := strconv.Atoi(m[1])
+		f.serveVM(w, r, id, m[2])
 	case path == "/lxc" && r.Method == http.MethodPost:
 		p := ctParams(r)
 		id, _ := strconv.Atoi(p["vmid"])

@@ -35,6 +35,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/tools/events"
+	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -456,7 +457,7 @@ func (r *ContainerReconciler) handleContainerOperations(ctx context.Context,
 func (r *ContainerReconciler) handleAutoStart(ctx context.Context,
 	pc *proxmox.ProxmoxClient, container *proxmoxv1alpha1.Container) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
-	if container.Spec.EnableAutoStart {
+	if ptr.Deref(container.Spec.EnableAutoStart, true) {
 		containerState, err := pc.GetContainerState(container)
 		if err != nil {
 			logger.Error(err, "Failed to get Container state")

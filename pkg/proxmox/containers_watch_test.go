@@ -54,7 +54,7 @@ func TestContainerWatcher_Drift(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			comparator := ContainerStateComparator()
+			comparator := RunningStateComparator()
 			drift, err := comparator.HasDrifted(desired, actual)
 			if err != nil {
 				t.Fatal(err)
@@ -81,7 +81,7 @@ func containerWatcherFixture(t *testing.T, f *fakeLXCHost, i int, autoStart bool
 		Spec:       proxmoxv1alpha1.ProxmoxConnectionSpec{Endpoint: f.url, TokenID: "test@pve!t", Secret: "secret"},
 	}
 	ct := testContainer("a", 0)
-	ct.Spec.EnableAutoStart = autoStart
+	ct.Spec.EnableAutoStart = &autoStart
 	ct.Spec.ConnectionRef = connRef
 	ct.Spec.Template = proxmoxv1alpha1.ContainerTemplate{Cores: 2, Memory: 512}
 	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(conn, ct).Build()
