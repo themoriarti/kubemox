@@ -20,6 +20,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"reflect"
+	"strings"
 	"time"
 
 	kerrors "k8s.io/apimachinery/pkg/api/errors"
@@ -63,6 +65,8 @@ const (
 	reasonVolumeSourceWaiting = "SourceNotReady"
 	reasonVolumeSourceBusy    = "SourceBusy"
 	reasonVolumeSourceKept    = "SourceNotCloneable"
+	reasonVolumeDownloading   = "Downloading"
+	reasonVolumeWaitingUpload = "WaitingForUpload"
 	reasonVolumeFailed        = "ProxmoxRefused"
 	reasonVolumeInUse         = "InUse"
 
@@ -144,9 +148,12 @@ func (r *VirtualMachineVolumeReconciler) create(ctx context.Context, pc *proxmox
 	vol *proxmoxv1alpha1.VirtualMachineVolume) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
 
-	importFrom, result, err := r.resolveSource(ctx, vol)
+	importFrom, tmpFile, result, err := r.resolveSource(ctx, pc, vol)
 	if err != nil || result != nil {
 		return orEmpty(result), err
+	}
+	if vol.Spec.Optical {
+		return r.createOptical(ctx, vol, importFrom)
 	}
 
 	if _, err = r.setReady(ctx, vol, metav1.ConditionFalse, reasonVolumeCreating,
@@ -162,6 +169,13 @@ func (r *VirtualMachineVolumeReconciler) create(ctx context.Context, pc *proxmox
 	if err != nil {
 		return r.fail(ctx, vol, err)
 	}
+	if tmpFile != "" {
+		// The downloaded or uploaded file served its purpose; a failure to
+		// remove it leaves a traceable leftover, not a broken disk.
+		if derr := pc.DeleteStorageFile(ctx, vol.Spec.NodeName, proxmox.VolumeStorage(tmpFile), tmpFile); derr != nil {
+			logger.Error(derr, "Could not remove the import file", "file", tmpFile)
+		}
+	}
 	logger.Info("Created volume", "slot", slot, "volume", volid, "sizeGiB", size, "holder", holder.VMID)
 	if r.Recorder != nil {
 		r.Recorder.Eventf(vol, nil, "Normal", "Created", "Created",
@@ -175,6 +189,7 @@ func (r *VirtualMachineVolumeReconciler) create(ctx context.Context, pc *proxmox
 	vol.Status.Volume = volid
 	vol.Status.Size = size
 	vol.Status.AttachedTo = ""
+	vol.Status.UploadTarget = nil
 	vol.Status.Phase = proxmoxv1alpha1.VirtualMachineVolumePhaseReady
 	vol.Status.LastObserved = &now
 	vol.Status.ObservedGeneration = vol.Generation
@@ -190,20 +205,108 @@ func (r *VirtualMachineVolumeReconciler) create(ctx context.Context, pc *proxmox
 	return ctrl.Result{RequeueAfter: volumeObservePeriod}, nil
 }
 
+// createOptical records the ISO as the volume: the file resolveSource put on
+// the storage, or the iso volume id the source named. No holder, no drive.
+func (r *VirtualMachineVolumeReconciler) createOptical(ctx context.Context,
+	vol *proxmoxv1alpha1.VirtualMachineVolume, volid string) (ctrl.Result, error) {
+	if volid == "" {
+		return ctrl.Result{}, r.terminal(ctx, vol, "an optical volume needs a source: an http or upload image, or an iso volume id")
+	}
+	if r.Recorder != nil {
+		r.Recorder.Eventf(vol, nil, "Normal", "Created", "Created", "ISO %s is in place", volid)
+	}
+	patch := client.MergeFrom(vol.DeepCopy())
+	now := metav1.Now()
+	vol.Status.Holder = nil
+	vol.Status.Slot = proxmoxv1alpha1.VirtualMachineVolumeOpticalSlot
+	vol.Status.Volume = volid
+	vol.Status.AttachedTo = ""
+	vol.Status.UploadTarget = nil
+	vol.Status.Phase = proxmoxv1alpha1.VirtualMachineVolumePhaseReady
+	vol.Status.LastObserved = &now
+	vol.Status.ObservedGeneration = vol.Generation
+	meta.SetStatusCondition(&vol.Status.Conditions, metav1.Condition{
+		Type: typeReadyVirtualMachineVolume, Status: metav1.ConditionTrue, Reason: reasonVolumeReady,
+		Message: fmt.Sprintf("ISO %s is in place", volid),
+	})
+	if err := r.Status().Patch(ctx, vol, patch); err != nil {
+		return ctrl.Result{}, client.IgnoreNotFound(err)
+	}
+	return ctrl.Result{RequeueAfter: volumeObservePeriod}, nil
+}
+
+// fileSource says where a file that populates the volume goes: the storage
+// the source names, or the volume's own, with the content type of the kind
+// of volume, and the name the file gets.
+func fileSource(vol *proxmoxv1alpha1.VirtualMachineVolume, storage, origin string) (string, string, string) {
+	if storage == "" {
+		storage = vol.Spec.Storage
+	}
+	content := proxmox.ContentImport
+	if vol.Spec.Optical {
+		content = proxmox.ContentISO
+	}
+	return storage, content, proxmox.ImportFilename(vol.Namespace, vol.Name, origin)
+}
+
 // resolveSource turns the spec source into the import-from argument: a
-// volume id as given, or the current volume id of another
-// VirtualMachineVolume once that one is Ready and not attached to anything.
-// A source in another namespace is copied only when it is marked cloneable;
-// until then this waits rather than fails, so marking the source later is
-// enough.
-func (r *VirtualMachineVolumeReconciler) resolveSource(ctx context.Context,
-	vol *proxmoxv1alpha1.VirtualMachineVolume) (importFrom string, result *ctrl.Result, err error) {
+// volume id as given, the current volume id of another VirtualMachineVolume
+// once that one is Ready and not attached to anything, or a file this puts
+// on a storage from a URL or finds there after an upload; such a file is
+// also returned as tmpFile for the caller to remove once used. A source in
+// another namespace is copied only when it is marked cloneable; until then
+// this waits rather than fails, so marking the source later is enough.
+func (r *VirtualMachineVolumeReconciler) resolveSource(ctx context.Context, pc *proxmox.ProxmoxClient,
+	vol *proxmoxv1alpha1.VirtualMachineVolume) (importFrom, tmpFile string, result *ctrl.Result, err error) {
 	src := vol.Spec.Source
 	switch {
 	case src == nil:
-		return "", nil, nil
+		return "", "", nil, nil
 	case src.Volume != "":
-		return src.Volume, nil, nil
+		return src.Volume, "", nil, nil
+	case src.HTTP != nil:
+		storage, content, filename := fileSource(vol, src.HTTP.Storage, src.HTTP.URL)
+		if _, err = r.setReady(ctx, vol, metav1.ConditionFalse, reasonVolumeDownloading,
+			fmt.Sprintf("downloading %s to %s on %s", src.HTTP.URL, storage, vol.Spec.NodeName),
+			proxmoxv1alpha1.VirtualMachineVolumePhasePending, 0); err != nil {
+			return "", "", nil, err
+		}
+		volid, err := pc.UploadFromURL(ctx, vol.Spec.NodeName, storage, content, filename, src.HTTP.URL)
+		if err != nil {
+			res, ferr := r.fail(ctx, vol, err)
+			return "", "", &res, ferr
+		}
+		if vol.Spec.Optical {
+			return volid, "", nil, nil
+		}
+		return volid, volid, nil, nil
+	case src.Upload != nil:
+		storage, content, filename := fileSource(vol, src.Upload.Storage, "")
+		filename = strings.TrimSuffix(filename, ".raw")
+		volid, err := pc.FindStorageFile(ctx, vol.Spec.NodeName, storage, content, filename)
+		if err != nil {
+			return "", "", nil, err
+		}
+		if volid == "" {
+			target := &proxmoxv1alpha1.VirtualMachineVolumeUploadTarget{
+				Node: vol.Spec.NodeName, Storage: storage, Content: content, Filename: filename}
+			if !reflect.DeepEqual(vol.Status.UploadTarget, target) {
+				patch := client.MergeFrom(vol.DeepCopy())
+				vol.Status.UploadTarget = target
+				if err = r.Status().Patch(ctx, vol, patch); err != nil {
+					return "", "", nil, client.IgnoreNotFound(err)
+				}
+			}
+			res, serr := r.setReady(ctx, vol, metav1.ConditionFalse, reasonVolumeWaitingUpload,
+				fmt.Sprintf("waiting for %s.<ext> to be uploaded as %s content of %s on %s",
+					filename, content, storage, vol.Spec.NodeName),
+				proxmoxv1alpha1.VirtualMachineVolumePhasePending, volumeSourceRetry)
+			return "", "", &res, serr
+		}
+		if vol.Spec.Optical {
+			return volid, "", nil, nil
+		}
+		return volid, volid, nil, nil
 	case src.Disk != nil:
 		key := types.NamespacedName{Namespace: src.Disk.Namespace, Name: src.Disk.Name}
 		if key.Namespace == "" {
@@ -219,9 +322,9 @@ func (r *VirtualMachineVolumeReconciler) resolveSource(ctx context.Context,
 				res, serr := r.setReady(ctx, vol, metav1.ConditionFalse, reasonVolumeSourceWaiting,
 					fmt.Sprintf("source VirtualMachineVolume %s does not exist", name),
 					proxmoxv1alpha1.VirtualMachineVolumePhasePending, volumeSourceRetry)
-				return "", &res, serr
+				return "", "", &res, serr
 			}
-			return "", nil, err
+			return "", "", nil, err
 		}
 		switch {
 		case key.Namespace != vol.Namespace && !other.Spec.Cloneable:
@@ -229,14 +332,14 @@ func (r *VirtualMachineVolumeReconciler) resolveSource(ctx context.Context,
 				fmt.Sprintf("source VirtualMachineVolume %s is in another namespace and not cloneable; "+
 					"its owner has to set spec.cloneable to true", name),
 				proxmoxv1alpha1.VirtualMachineVolumePhasePending, volumeSourceRetry)
-			return "", &res, serr
+			return "", "", &res, serr
 		case other.Status.Volume == "" || other.Status.Phase == proxmoxv1alpha1.VirtualMachineVolumePhasePending:
 			res, serr := r.setReady(ctx, vol, metav1.ConditionFalse, reasonVolumeSourceWaiting,
 				fmt.Sprintf("source VirtualMachineVolume %s is not ready yet", name),
 				proxmoxv1alpha1.VirtualMachineVolumePhasePending, volumeSourceRetry)
-			return "", &res, serr
+			return "", "", &res, serr
 		case other.Spec.NodeName != vol.Spec.NodeName:
-			return "", nil, r.terminal(ctx, vol, fmt.Sprintf(
+			return "", "", nil, r.terminal(ctx, vol, fmt.Sprintf(
 				"source VirtualMachineVolume %s lives on node %s, this one on %s; a copy cannot cross nodes",
 				name, other.Spec.NodeName, vol.Spec.NodeName))
 		case other.Status.AttachedTo != "":
@@ -244,17 +347,29 @@ func (r *VirtualMachineVolumeReconciler) resolveSource(ctx context.Context,
 				fmt.Sprintf("source VirtualMachineVolume %s is attached to VirtualMachine %s; "+
 					"a copy is only made while the source is free", name, other.Status.AttachedTo),
 				proxmoxv1alpha1.VirtualMachineVolumePhasePending, volumeSourceRetry)
-			return "", &res, serr
+			return "", "", &res, serr
 		}
-		return other.Status.Volume, nil, nil
+		return other.Status.Volume, "", nil, nil
 	}
-	return "", nil, r.terminal(ctx, vol, "source has neither volume nor disk")
+	return "", "", nil, r.terminal(ctx, vol, "source has neither volume, disk, http nor upload")
 }
 
 // observe re-reads the volume from its holder, grows it when the spec asks
 // for more, and records what Proxmox reports.
 func (r *VirtualMachineVolumeReconciler) observe(ctx context.Context, pc *proxmox.ProxmoxClient,
 	vol *proxmoxv1alpha1.VirtualMachineVolume) (ctrl.Result, error) {
+	if vol.Spec.Optical && vol.Status.AttachedTo == "" && vol.Status.Volume != "" {
+		present, err := pc.HasStorageFile(ctx, vol.Spec.NodeName, proxmox.VolumeStorage(vol.Status.Volume), vol.Status.Volume)
+		if err != nil {
+			return r.fail(ctx, vol, fmt.Errorf("looking for the ISO: %w", err))
+		}
+		if !present {
+			return r.fail(ctx, vol, fmt.Errorf("ISO %s is gone from its storage", vol.Status.Volume))
+		}
+		return r.setReady(ctx, vol, metav1.ConditionTrue, reasonVolumeReady,
+			fmt.Sprintf("ISO %s is in place", vol.Status.Volume),
+			proxmoxv1alpha1.VirtualMachineVolumePhaseReady, volumeObservePeriod)
+	}
 	if vol.Status.Holder == nil || vol.Status.Slot == "" || vol.Status.AttachedTo != "" {
 		return ctrl.Result{RequeueAfter: volumeObservePeriod}, nil
 	}
@@ -311,6 +426,11 @@ func (r *VirtualMachineVolumeReconciler) handleDelete(ctx context.Context, pc *p
 	case vol.Spec.DeletionProtection:
 		logger.Info("Deletion protection is on, leaving the volume on the holder",
 			"volume", vol.Status.Volume, "holder", vol.Status.Holder)
+	case vol.Spec.Optical && vol.Status.Volume != "":
+		if err := pc.DeleteStorageFile(ctx, vol.Spec.NodeName, proxmox.VolumeStorage(vol.Status.Volume), vol.Status.Volume); err != nil {
+			return r.fail(ctx, vol, fmt.Errorf("removing the ISO: %w", err))
+		}
+		logger.Info("Removed ISO", "volume", vol.Status.Volume)
 	case vol.Status.Holder != nil && vol.Status.Slot != "":
 		holder := &proxmox.DiskHolder{Name: vol.Status.Holder.Name, VMID: vol.Status.Holder.VMID, Node: vol.Spec.NodeName}
 		if err := pc.DeleteHolderDisk(ctx, holder, vol.Status.Slot); err != nil {

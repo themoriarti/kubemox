@@ -108,7 +108,7 @@ func (r *VirtualMachineReconciler) reconcileVolumes(ctx context.Context, pc *pro
 			// it back first; the stale pass below does that, and the next
 			// reconcile attaches it where the spec wants it now.
 			continue
-		case vol.Status.Phase != proxmoxv1alpha1.VirtualMachineVolumePhaseReady || vol.Status.Holder == nil:
+		case vol.Status.Phase != proxmoxv1alpha1.VirtualMachineVolumePhaseReady || (vol.Status.Holder == nil && !vol.Spec.Optical):
 			r.volumeEvent(vm, "Normal", reasonVolumeNotReady,
 				"VirtualMachineVolume %s is %s; waiting for it to be Ready", vol.Name, vol.Status.Phase)
 			return &ctrl.Result{RequeueAfter: volumeAttachRetry}, nil
@@ -222,21 +222,27 @@ func (r *VirtualMachineReconciler) detachVolume(ctx context.Context, pc *proxmox
 		r.volumeEvent(vm, "Warning", "Error", "giving back VirtualMachineVolume %s: %v", vol.Name, err)
 		return err
 	}
+	where := fmt.Sprintf("ISO %s is in place", volid)
+	if holder != nil {
+		where = fmt.Sprintf("volume %s sits on holder %s as %s", volid, holder.Name, slot)
+	}
 	if err = r.patchVolumeStatus(ctx, vol, func(v *proxmoxv1alpha1.VirtualMachineVolume) {
 		v.Status.AttachedTo = ""
-		v.Status.Holder = &proxmoxv1alpha1.VirtualMachineVolumeHolder{Name: holder.Name, VMID: holder.VMID}
+		v.Status.Holder = nil
+		if holder != nil {
+			v.Status.Holder = &proxmoxv1alpha1.VirtualMachineVolumeHolder{Name: holder.Name, VMID: holder.VMID}
+		}
 		v.Status.Slot = slot
 		v.Status.Volume = volid
 		v.Status.Phase = proxmoxv1alpha1.VirtualMachineVolumePhaseReady
 		meta.SetStatusCondition(&v.Status.Conditions, metav1.Condition{
-			Type: typeReadyVirtualMachineVolume, Status: metav1.ConditionTrue, Reason: reasonVolumeReady,
-			Message: fmt.Sprintf("volume %s sits on holder %s as %s", volid, holder.Name, slot),
+			Type: typeReadyVirtualMachineVolume, Status: metav1.ConditionTrue, Reason: reasonVolumeReady, Message: where,
 		})
 	}); err != nil {
 		return err
 	}
-	log.FromContext(ctx).Info("Gave volume back to its holder", "volume", vol.Name, "slot", slot, "volid", volid)
-	r.volumeEvent(vm, "Normal", reasonVolumeDetached, "VirtualMachineVolume %s given back to holder %s as %s", vol.Name, holder.Name, slot)
+	log.FromContext(ctx).Info("Gave volume back", "volume", vol.Name, "slot", slot, "volid", volid)
+	r.volumeEvent(vm, "Normal", reasonVolumeDetached, "VirtualMachineVolume %s detached: %s", vol.Name, where)
 	return nil
 }
 

@@ -73,7 +73,7 @@ func VolumeStorage(volid string) string {
 // under its new owner.
 func (pc *ProxmoxClient) AttachVolume(ctx context.Context, vm *proxmoxv1alpha1.VirtualMachine,
 	device string, vol *proxmoxv1alpha1.VirtualMachineVolume) (volid string, err error) {
-	if vol.Status.Holder == nil || vol.Status.Slot == "" {
+	if !vol.Spec.Optical && (vol.Status.Holder == nil || vol.Status.Slot == "") {
 		return "", fmt.Errorf("volume %s has no holder slot to attach from", vol.Name)
 	}
 	vmid, err := pc.getVMID(vm.Spec.Name, vm.Spec.NodeName)
@@ -90,6 +90,23 @@ func (pc *ProxmoxClient) AttachVolume(ctx context.Context, vm *proxmoxv1alpha1.V
 			return occupied, nil
 		}
 		return "", fmt.Errorf("device %s of VirtualMachine %s already holds %s", device, vm.Spec.Name, occupied)
+	}
+	if vol.Spec.Optical {
+		// An ISO is storage content, not a drive of anyone: it is referenced
+		// by the cdrom device, read-only, and nothing moves.
+		qvm, err := pc.diskVM(ctx, vm.Spec.NodeName, vmid)
+		if err != nil {
+			return "", err
+		}
+		task, err := qvm.Config(ctx, proxmox.VirtualMachineOption{Name: device, Value: vol.Status.Volume + ",media=cdrom"})
+		if err == nil {
+			err = waitDiskTask(ctx, task, diskConfigTimeout)
+		}
+		if err != nil {
+			return "", fmt.Errorf("attaching ISO %s to %s %s: %w", vol.Name, vm.Spec.Name, device, err)
+		}
+		pc.invalidateVM(vm.Spec.NodeName, vmid)
+		return vol.Status.Volume, nil
 	}
 	volid, err = pc.MoveDisk(ctx, vm.Spec.NodeName, vol.Status.Holder.VMID, vol.Status.Slot, vmid, device)
 	if err != nil {
@@ -174,16 +191,33 @@ func isHardDiskSlot(slot string) bool {
 // id. The VM has to be stopped: Proxmox refuses to reassign a drive in use.
 func (pc *ProxmoxClient) DetachVolume(ctx context.Context, vm *proxmoxv1alpha1.VirtualMachine,
 	device string, vol *proxmoxv1alpha1.VirtualMachineVolume) (holder *DiskHolder, slot, volid string, err error) {
-	holder, err = pc.EnsureDiskHolder(ctx, vol.Namespace, vol.Spec.NodeName)
-	if err != nil {
-		return nil, "", "", err
-	}
 	vmid, err := pc.getVMID(vm.Spec.Name, vm.Spec.NodeName)
 	if err != nil {
 		return nil, "", "", err
 	}
 	if vmid == 0 {
 		return nil, "", "", vmNotFound(vm)
+	}
+	if vol.Spec.Optical {
+		// Dropping the cdrom device leaves the ISO on its storage; there is
+		// no holder to give it back to.
+		qvm, err := pc.diskVM(ctx, vm.Spec.NodeName, vmid)
+		if err != nil {
+			return nil, "", "", err
+		}
+		task, err := qvm.Config(ctx, proxmox.VirtualMachineOption{Name: "delete", Value: device})
+		if err == nil {
+			err = waitDiskTask(ctx, task, diskConfigTimeout)
+		}
+		if err != nil {
+			return nil, "", "", fmt.Errorf("detaching ISO %s from %s %s: %w", vol.Name, vm.Spec.Name, device, err)
+		}
+		pc.invalidateVM(vm.Spec.NodeName, vmid)
+		return nil, proxmoxv1alpha1.VirtualMachineVolumeOpticalSlot, vol.Status.Volume, nil
+	}
+	holder, err = pc.EnsureDiskHolder(ctx, vol.Namespace, vol.Spec.NodeName)
+	if err != nil {
+		return nil, "", "", err
 	}
 	current, _, err := pc.ReadDisk(ctx, vm.Spec.NodeName, vmid, device)
 	if err != nil {
