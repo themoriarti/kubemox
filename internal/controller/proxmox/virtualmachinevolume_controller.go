@@ -373,7 +373,7 @@ func (r *VirtualMachineVolumeReconciler) observe(ctx context.Context, pc *proxmo
 	if vol.Status.Holder == nil || vol.Status.Slot == "" || vol.Status.AttachedTo != "" {
 		return ctrl.Result{RequeueAfter: volumeObservePeriod}, nil
 	}
-	volid, size, err := pc.ReadDisk(ctx, vol.Spec.NodeName, vol.Status.Holder.VMID, vol.Status.Slot)
+	volid, sizeBytes, err := pc.ReadDiskBytes(ctx, vol.Spec.NodeName, vol.Status.Holder.VMID, vol.Status.Slot)
 	if err != nil {
 		return r.fail(ctx, vol, fmt.Errorf("reading the volume from its holder: %w", err))
 	}
@@ -381,7 +381,10 @@ func (r *VirtualMachineVolumeReconciler) observe(ctx context.Context, pc *proxmo
 		return r.fail(ctx, vol, fmt.Errorf("slot %s of holder %s (VMID %d) is empty; the volume is gone",
 			vol.Status.Slot, vol.Status.Holder.Name, vol.Status.Holder.VMID))
 	}
-	if kubernetes.GetReconcileMode(vol) != kubernetes.ReconcileModeWatchOnly && vol.Spec.Size > size {
+	size := proxmox.BytesToGiB(sizeBytes)
+	// Bytes, not the whole-GiB figure: that rounds up and hides a disk just
+	// short of what was asked.
+	if kubernetes.GetReconcileMode(vol) != kubernetes.ReconcileModeWatchOnly && proxmox.GiBToBytes(vol.Spec.Size) > sizeBytes {
 		if err = pc.ResizeDisk(ctx, vol.Spec.NodeName, vol.Status.Holder.VMID, vol.Status.Slot, vol.Spec.Size); err != nil {
 			return r.fail(ctx, vol, err)
 		}

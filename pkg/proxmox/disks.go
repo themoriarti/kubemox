@@ -211,11 +211,14 @@ func (pc *ProxmoxClient) CreateHolderDisk(ctx context.Context, h *DiskHolder,
 		return "", "", 0, fmt.Errorf("creating disk %s on holder %d: %w", slot, h.VMID, err)
 	}
 
-	volid, actualGiB, err = pc.ReadDisk(ctx, h.Node, h.VMID, slot)
+	volid, actualBytes, err := pc.ReadDiskBytes(ctx, h.Node, h.VMID, slot)
 	if err != nil {
 		return "", "", 0, err
 	}
-	if importFrom != "" && actualGiB < sizeGiB {
+	actualGiB = BytesToGiB(actualBytes)
+	// An import is the source's exact size, which the whole-GiB figure
+	// rounds up: a 4M image reads as 1 GiB, so compare bytes.
+	if importFrom != "" && actualBytes < GiBToBytes(sizeGiB) {
 		if err = pc.ResizeDisk(ctx, h.Node, h.VMID, slot, sizeGiB); err != nil {
 			return slot, volid, actualGiB, err
 		}
@@ -228,6 +231,14 @@ func (pc *ProxmoxClient) CreateHolderDisk(ctx context.Context, h *DiskHolder,
 // An empty volume id means the slot is empty.
 func (pc *ProxmoxClient) ReadDisk(ctx context.Context, node string, vmid int,
 	slot string) (volid string, sizeGiB int, err error) {
+	volid, size, err := pc.ReadDiskBytes(ctx, node, vmid, slot)
+	return volid, BytesToGiB(size), err
+}
+
+// ReadDiskBytes is ReadDisk with the size in bytes, for deciding whether a
+// drive is at least as large as asked.
+func (pc *ProxmoxClient) ReadDiskBytes(ctx context.Context, node string, vmid int,
+	slot string) (volid string, size int64, err error) {
 	vm, err := pc.diskVM(ctx, node, vmid)
 	if err != nil {
 		return "", 0, err
@@ -236,8 +247,8 @@ func (pc *ProxmoxClient) ReadDisk(ctx context.Context, node string, vmid int,
 	if value == "" {
 		return "", 0, nil
 	}
-	volid, sizeGiB = parseDriveValue(value)
-	return volid, sizeGiB, nil
+	volid, size = parseDriveBytes(value)
+	return volid, size, nil
 }
 
 // ResizeDisk grows the drive in a slot to sizeGiB. Proxmox refuses to shrink.
@@ -374,48 +385,62 @@ func driveValue(cfg *proxmox.VirtualMachineConfig, slot string) string {
 // "main-pool:vm-9998-disk-0,size=10G,discard=on" into its volume id and its
 // size in GiB. A size without a unit is in KiB, as qm reports it.
 func parseDriveValue(value string) (volid string, sizeGiB int) {
+	volid, size := parseDriveBytes(value)
+	return volid, BytesToGiB(size)
+}
+
+func parseDriveBytes(value string) (volid string, size int64) {
 	parts := strings.Split(value, ",")
 	volid = parts[0]
 	for _, p := range parts[1:] {
 		if !strings.HasPrefix(p, "size=") {
 			continue
 		}
-		sizeGiB = sizeToGiB(strings.TrimPrefix(p, "size="))
+		size = sizeToBytes(strings.TrimPrefix(p, "size="))
 	}
-	return volid, sizeGiB
+	return volid, size
 }
 
-// sizeToGiB converts a Proxmox size such as "10G", "512M", "1T" or a bare
-// KiB count to whole GiB, rounding up so that a disk is never reported
-// smaller than it is.
-func sizeToGiB(s string) int {
+const bytesPerGiB = int64(1) << 30
+
+// BytesToGiB rounds a size up to whole GiB, so that a disk is never reported
+// smaller than it is; a 4M image counts as 1 GiB.
+func BytesToGiB(size int64) int {
+	return int((size + bytesPerGiB - 1) / bytesPerGiB)
+}
+
+func GiBToBytes(gib int) int64 { return int64(gib) * bytesPerGiB }
+
+// sizeToBytes converts a Proxmox size such as "10G", "512M", "1.5T" or a
+// bare KiB count to bytes.
+func sizeToBytes(s string) int64 {
 	if s == "" {
 		return 0
 	}
 	unit := s[len(s)-1]
 	number := s
-	factor := 1.0 / (1024 * 1024) // bare value: KiB
+	factor := 1024.0 // bare value: KiB
 	switch unit {
 	case 'K':
 		number = s[:len(s)-1]
 	case 'M':
 		number = s[:len(s)-1]
-		factor = 1.0 / 1024
+		factor = 1024 * 1024
 	case 'G':
 		number = s[:len(s)-1]
-		factor = 1
+		factor = float64(bytesPerGiB)
 	case 'T':
 		number = s[:len(s)-1]
-		factor = 1024
+		factor = float64(bytesPerGiB) * 1024
 	case 'P':
 		number = s[:len(s)-1]
-		factor = 1024 * 1024
+		factor = float64(bytesPerGiB) * 1024 * 1024
 	}
 	v, err := strconv.ParseFloat(number, 64)
 	if err != nil {
 		return 0
 	}
-	return int(math.Ceil(v * factor))
+	return int64(math.Round(v * factor))
 }
 
 // waitDiskTask waits for a Proxmox task and turns a failed one into a
