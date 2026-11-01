@@ -32,7 +32,7 @@ type fakePVE struct {
 	mu      sync.Mutex
 	nextID  int
 	vms     map[int]*fakeVM
-	volumes map[string]int // volid -> size in GiB
+	volumes map[string]int // volid -> size in MiB; images come in fractions of a GiB
 	freed   []string       // volids freed, in order
 	calls   []string       // "METHOD path" in order
 }
@@ -86,21 +86,29 @@ func (f *fakePVE) addVM(vmid int, node, name string, extra map[string]string) {
 // addVolume registers a volume that exists on a storage without belonging
 // to any config here, such as a template's base disk or an import file.
 func (f *fakePVE) addVolume(volid string, sizeGiB int) {
-	f.volumes[volid] = sizeGiB
+	f.volumes[volid] = sizeGiB * 1024
 }
 
-func (f *fakePVE) allocate(storage string, vmid, sizeGiB int) string {
+func (f *fakePVE) addVolumeMiB(volid string, sizeMiB int) {
+	f.volumes[volid] = sizeMiB
+}
+
+func (f *fakePVE) allocate(storage string, vmid, sizeMiB int) string {
 	for n := 0; ; n++ {
 		volid := fmt.Sprintf("%s:vm-%d-disk-%d", storage, vmid, n)
 		if _, taken := f.volumes[volid]; !taken {
-			f.volumes[volid] = sizeGiB
+			f.volumes[volid] = sizeMiB
 			return volid
 		}
 	}
 }
 
+// driveString prints the size as Proxmox does: whole GiB as "G", else "M".
 func (f *fakePVE) driveString(volid string) string {
-	return fmt.Sprintf("%s,size=%dG", volid, f.volumes[volid])
+	if mib := f.volumes[volid]; mib%1024 != 0 {
+		return fmt.Sprintf("%s,size=%dM", volid, mib)
+	}
+	return fmt.Sprintf("%s,size=%dG", volid, f.volumes[volid]/1024)
 }
 
 func (f *fakePVE) nextUnused(vm *fakeVM) string {
@@ -264,6 +272,7 @@ func (f *fakePVE) handleVM(w http.ResponseWriter, r *http.Request, node string, 
 		}
 		volid, _ := parseDriveValue(value)
 		size, _ := strconv.Atoi(strings.TrimSuffix(p["size"], "G"))
+		size *= 1024
 		if size < f.volumes[volid] {
 			writeError(w, 500, "shrinking disks is not supported")
 			return
@@ -327,6 +336,7 @@ func (f *fakePVE) applyConfig(w http.ResponseWriter, vm *fakeVM, node string, vm
 			}
 			storage := sv[0]
 			size, _ := strconv.Atoi(sv[1])
+			size *= 1024
 			if len(spec) == 2 && strings.HasPrefix(spec[1], "import-from=") {
 				src := strings.TrimPrefix(spec[1], "import-from=")
 				srcSize, ok := f.volumes[src]
@@ -493,7 +503,7 @@ func TestCreateHolderDiskBlankAndImport(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if slot != slotScsi1 || volid != "main-pool:vm-9998-disk-1" || size != 20 || f.volumes[volid] != 20 {
+	if slot != slotScsi1 || volid != "main-pool:vm-9998-disk-1" || size != 20 || f.volumes[volid] != 20*1024 {
 		t.Fatalf("imported disk = %s %s %d (fake size %d)", slot, volid, size, f.volumes[volid])
 	}
 	if f.vms[9998].config[keyProtection] != "1" {
@@ -512,6 +522,39 @@ func TestCreateHolderDiskBlankAndImport(t *testing.T) {
 
 	if _, _, _, err = pc.CreateHolderDisk(ctx, h, fakeStorage, 1, "main-pool:does-not-exist"); err == nil {
 		t.Fatal("import from a missing volume succeeded")
+	}
+
+	// An image below a whole GiB reads as 1 GiB when rounded, which once
+	// hid it from the resize: a 4M upload asked for as 1G has to grow.
+	f.addVolumeMiB("local:import/vmvol-x.raw", 4)
+	_, volid, size, err = pc.CreateHolderDisk(ctx, h, fakeStorage, 1, "local:import/vmvol-x.raw")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if size != 1 || f.volumes[volid] != 1024 {
+		t.Fatalf("4M import asked for as 1G = %d GiB (fake size %d MiB)", size, f.volumes[volid])
+	}
+	// The same just short of the request: 1.5G grows to 2G.
+	f.addVolumeMiB("local:import/vmvol-y.qcow2", 1536)
+	_, volid, size, err = pc.CreateHolderDisk(ctx, h, fakeStorage, 2, "local:import/vmvol-y.qcow2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if size != 2 || f.volumes[volid] != 2048 {
+		t.Fatalf("1.5G import asked for as 2G = %d GiB (fake size %d MiB)", size, f.volumes[volid])
+	}
+}
+
+func TestSizeToBytes(t *testing.T) {
+	for in, want := range map[string]int64{
+		"4M": 4 << 20, "1.5G": 3 << 29, "366K": 366 << 10, "1048576": 1 << 30, "2T": 2 << 40, "": 0, "x": 0,
+	} {
+		if got := sizeToBytes(in); got != want {
+			t.Errorf("sizeToBytes(%q) = %d, want %d", in, got, want)
+		}
+	}
+	if BytesToGiB(4<<20) != 1 || BytesToGiB(0) != 0 || BytesToGiB(2<<30) != 2 {
+		t.Error("BytesToGiB rounds wrong")
 	}
 }
 
