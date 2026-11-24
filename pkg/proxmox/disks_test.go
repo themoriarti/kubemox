@@ -375,6 +375,10 @@ func (f *fakePVE) moveDisk(w http.ResponseWriter, vm *fakeVM, node string, vmid 
 		writeError(w, 500, fmt.Sprintf("Both VMs need to be on the same node (%s != %s)", vm.node, tvm.node))
 		return
 	}
+	if vm.config[keyProtection] == "1" {
+		writeError(w, 500, "Can't move disks from protected VMs - protection mode enabled")
+		return
+	}
 	value, ok := vm.config[p["disk"]]
 	if !ok {
 		writeError(w, 500, fmt.Sprintf("Disk '%s' for VM '%d' does not exist", p["disk"], vmid))
@@ -587,11 +591,18 @@ func TestMoveDiskRenamesVolumeAndSurvivesDestroy(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Reassign from the protected holder to the VM: allowed, and the volume
-	// takes the new owner's name.
-	moved, err := pc.MoveDisk(ctx, fakeNode, 9998, slot, 9999, slotScsi0)
+	// Newer Proxmox refuses move_disk from a protected VM, so the plain move fails.
+	if _, err = pc.MoveDisk(ctx, fakeNode, 9998, slot, 9999, slotScsi0); err == nil {
+		t.Fatalf("plain move from the protected holder: %v", err)
+	}
+	// Reassign from the holder to the VM: protection is lifted for the move and
+	// restored after it, and the volume takes the new owner's name.
+	moved, err := pc.MoveDiskFromHolder(ctx, fakeNode, 9998, slot, 9999, slotScsi0)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if f.vms[9998].config[keyProtection] != "1" {
+		t.Fatal("holder protection not restored after the move")
 	}
 	if moved == volid || !strings.HasPrefix(moved, "main-pool:vm-9999-disk-") {
 		t.Fatalf("moved volid = %q (was %q)", moved, volid)

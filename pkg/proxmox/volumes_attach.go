@@ -108,7 +108,7 @@ func (pc *ProxmoxClient) AttachVolume(ctx context.Context, vm *proxmoxv1alpha1.V
 		pc.invalidateVM(vm.Spec.NodeName, vmid)
 		return vol.Status.Volume, nil
 	}
-	volid, err = pc.MoveDisk(ctx, vm.Spec.NodeName, vol.Status.Holder.VMID, vol.Status.Slot, vmid, device)
+	volid, err = pc.MoveDiskFromHolder(ctx, vm.Spec.NodeName, vol.Status.Holder.VMID, vol.Status.Slot, vmid, device)
 	if err != nil {
 		return "", fmt.Errorf("attaching volume %s to %s %s: %w", vol.Name, vm.Spec.Name, device, err)
 	}

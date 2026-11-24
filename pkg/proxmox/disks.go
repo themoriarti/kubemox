@@ -339,6 +339,29 @@ func (pc *ProxmoxClient) MoveDisk(ctx context.Context, node string, fromVMID int
 	return volid, nil
 }
 
+// MoveDiskFromHolder is MoveDisk for a drive that sits on a holder. Newer
+// Proxmox refuses move_disk from a protected VM, so protection comes off for
+// the move and goes back on before returning, whatever happened.
+func (pc *ProxmoxClient) MoveDiskFromHolder(ctx context.Context, node string, holderVMID int, slot string,
+	toVMID int, targetSlot string) (volid string, err error) {
+	unlock := lockHolder(holderVMID)
+	defer unlock()
+
+	hvm, err := pc.diskVM(ctx, node, holderVMID)
+	if err != nil {
+		return "", err
+	}
+	if err = pc.setProtection(ctx, hvm, false); err != nil {
+		return "", err
+	}
+	defer func() {
+		if perr := pc.setProtection(ctx, hvm, true); perr != nil && err == nil {
+			err = perr
+		}
+	}()
+	return pc.MoveDisk(ctx, node, holderVMID, slot, toVMID, targetSlot)
+}
+
 func (pc *ProxmoxClient) setProtection(ctx context.Context, vm *proxmox.VirtualMachine, on bool) error {
 	value := 0
 	if on {
